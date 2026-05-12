@@ -36,6 +36,7 @@ import {
 import { humanDuration, Logger } from "./Logger.js";
 import { Lockfile, LockfileBusyError } from "./Lockfile.js";
 import { hasTaskComplete, rotateProgressIfTooLarge } from "./ProgressFile.js";
+import { loadIterationPrompt } from "./promptTemplate.js";
 import { computeSleepUntil, sleepUntil } from "./RateLimit.js";
 import { runReviewSubloop } from "./review/subloop.js";
 import type { RunFixerOptions } from "./review/Fixer.js";
@@ -69,12 +70,14 @@ export interface LoopHooks {
 
 export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<number> {
   // Pre-flight ──────────────────────────────────────────────────────────────
-  for (const f of [cfg.tasksFile, cfg.progressFile, cfg.promptFile]) {
+  for (const f of [cfg.tasksFile, cfg.progressFile]) {
     if (!existsSync(f)) {
       process.stderr.write(`ralph: required file missing: ${f}\n`);
       return 1;
     }
   }
+  // promptFile is optional — if absent, we fall back to the bundled
+  // `prompts/iteration.md` shipped with the submodule.
   // tasks.md and progress.md must be writable — the loop revert/append
   // bookkeeping fails opaquely with EACCES otherwise (e.g., when ralph runs
   // under a different UID than the operator who created the files).
@@ -794,15 +797,15 @@ function relativePath(repoRoot: string, abs: string): string {
 }
 
 function buildPrompt(cfg: Config, task: TaskRef, attempt: number): string {
-  const base = readFileSync(cfg.promptFile, "utf8");
+  const base = loadIterationPrompt(cfg);
   return [
     base,
     "",
     "─".repeat(72),
-    "Loop runtime context (provided by ralph TS loop, not by you):",
+    "Loop runtime context (provided by the ralphloop driver, not by you):",
     `  Current task: #${task.id} — ${task.title}`,
     `  Attempt for this task: #${attempt}`,
-    `  Loop driver: bun ralph/run.ts`,
+    `  Loop driver: ralphloop`,
     "─".repeat(72),
     "",
   ].join("\n");

@@ -1,118 +1,285 @@
 #!/usr/bin/env bun
 /**
- * Ralph entrypoint — `bun ralph/run.ts` (or `bun run ralph` via package.json).
+ * Ralphloop CLI entrypoint.
  *
- * Parses CLI flags, builds the Config, runs the loop. Designed for fully
- * unattended operation: no prompts, no interactive output, exit codes
- * compatible with the bash version.
+ * Subcommands:
+ *   run        — drive the autonomous loop (default if no subcommand given)
+ *   init       — scaffold a .ralphloop/ workspace in cwd
+ *   doctor     — print resolved Config + validate workspace files
+ *   archive ls — list rotated progress archives
+ *
+ * Designed for unattended operation: no prompts, no interactive output,
+ * stable exit codes (0 = success / clean cap, 1 = failure / cap-with-failures,
+ * 2 = pre-flight / argument error).
  */
 
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { resolve } from "node:path";
 import { loadConfig, type ConfigOverrides } from "../src/Config.js";
 import { runLoop } from "../src/loop.js";
+import { runInit } from "../src/scaffolder.js";
+import { resolveWorkspace, type WorkspaceCliFlags } from "../src/workspace.js";
 
-interface ParsedFlags {
-  overrides: ConfigOverrides;
-  showHelp: boolean;
-}
+const HELP = `Usage: ralphloop <subcommand> [options]
 
-const HELP = `Usage: bun ralph/run.ts [options]
+Subcommands:
+  run                       drive the autonomous loop (default)
+  init                      scaffold .ralphloop/ in cwd
+  doctor                    print resolved Config + validate workspace
+  archive ls                list rotated progress archives
 
-Drives the ralph autonomous loop: reads ralph/tasks.md, invokes \`claude -p\`
-per iteration, runs tests, commits successful tasks. Resumes from wherever
-it was last time (state lives entirely in tasks.md, progress.md, and git).
+Common options (apply to every subcommand):
+  --cwd <dir>               working directory (default: process.cwd())
+  --workspace <dir>         workspace dir (default: <cwd>/.ralphloop)
+  --config <file>           config.yaml path (default: <workspaceDir>/config.yaml)
+  --repo <dir>              repo root for goal/tasks/progress resolution (default: <cwd>)
+  --goal <file>             project spec (default: <repoRoot>/GOAL.md)
+  --help, -h                show this message
 
-Options:
-  --max-iterations <N>     override RALPH_MAX_ITERATIONS (default 50)
-  --verbose                stream every claude output line to the console
-  --dry-run                print the next task and exit, no spawn / commit
-  --no-review              disable the reviewer→fixer sub-loop (default: enabled)
-  --review-max-rounds <N>  override RALPH_REVIEW_MAX_ROUNDS (default 5)
-  --help                   show this message
+\`run\` options:
+  --max-iterations <N>      override RALPH_MAX_ITERATIONS (default 50)
+  --verbose                 stream every agent line to the console
+  --dry-run                 print the next task and exit (no spawn / commit)
+  --no-review               disable the reviewer→fixer sub-loop
+  --review-max-rounds <N>   override RALPH_REVIEW_MAX_ROUNDS (default 5)
 
-Environment variables (same as ralph/loop.sh):
-  RALPH_CLAUDE_BIN              path to claude CLI (default 'claude')
-  RALPH_CLAUDE_MODEL            model name (default 'claude-sonnet-4-6')
-  RALPH_CLAUDE_TIMEOUT_S        per-iteration agent timeout (default 1800)
-  RALPH_TEST_TIMEOUT_S          test gate timeout (default 600)
-  RALPH_GIT_TIMEOUT_S           single git op timeout (default 60)
-  RALPH_MAX_ITERATIONS          hard iteration cap (default 50)
-  RALPH_NO_CHANGE_RETRY_LIMIT   no-diff retry budget per task (default 2)
-  RALPH_TASK_ATTEMPT_LIMIT      per-task attempt cap before blocking (default 5)
-  RALPH_FAIL_RESET              stash | reset | leave (default stash)
-  RALPH_TYPECHECK_ENABLED       run "bun run typecheck" before tests (default 1)
-  RALPH_LOG_RETENTION_DAYS      prune logs older than this at start (default 14)
-  RALPH_PROGRESS_MAX_BYTES      rotate progress.md above this size (default 65536)
-  RALPH_AGENT_MAX_BUFFER_BYTES  execa maxBuffer for the agent (default 50 MB)
-  RALPH_RATE_LIMIT_FALLBACK_MS  sleep when rate-limit reset is unknown (default 3600000)
-  RALPH_MIN_RATE_LIMIT_SLEEP_MS minimum rate-limit sleep (default 10000)
-  RALPH_STOP_MARKER             stop sentinel string (default 'TASK_COMPLETE')
+\`init\` options:
+  --create-goal-stub        create a stub GOAL.md at <repoRoot> if missing
 
-Review sub-loop:
-  RALPH_REVIEW_ENABLED          0/1 toggle (default 1; --no-review forces 0)
-  RALPH_REVIEWER_BIN            reviewer claude binary (default $RALPH_CLAUDE_BIN)
-  RALPH_REVIEWER_MODEL          reviewer model (default 'claude-opus-4-7')
-  RALPH_REVIEWER_TIMEOUT_S      reviewer wall-clock cap (default 600)
-  RALPH_FIXER_BIN               fixer claude binary (default $RALPH_CLAUDE_BIN)
-  RALPH_FIXER_MODEL             fixer model (default 'claude-sonnet-4-6')
-  RALPH_FIXER_TIMEOUT_S         fixer wall-clock cap (default 600)
-  RALPH_REVIEW_MAX_ROUNDS       sub-loop round cap (default 5)
-  RALPH_REVIEW_RL_RETRIES_PER_ROUND        rate-limit retry budget per round (default 3)
-  RALPH_REVIEW_MAX_NOOP_ROUNDS             halt after consecutive no-op fixer rounds (default 2)
-  RALPH_REVIEW_MAX_REPEAT_DIFF_ROUNDS      halt after consecutive identical diffs (default 2)
-  RALPH_REVIEW_MAX_REVIEWER_FAILURES       halt after consecutive reviewer crashes (default 2)
+Selected environment variables (full list: README.md):
+  RALPH_CLAUDE_BIN          path to claude CLI (default 'claude')
+  RALPH_CLAUDE_MODEL        agent model (default 'claude-sonnet-4-6')
+  RALPH_REVIEWER_MODEL      reviewer model (default 'claude-opus-4-7')
+  RALPH_FIXER_MODEL         fixer model (default 'claude-sonnet-4-6')
+  RALPH_WORKSPACE_DIR       same as --workspace
+  RALPH_GOAL_FILE           same as --goal
+  RALPH_CONFIG_FILE         same as --config
+
+Config precedence: CLI flag > env var > .ralphloop/config.yaml > built-in default.
 `;
 
-function parseArgs(argv: string[]): ParsedFlags {
-  const out: ParsedFlags = { overrides: {}, showHelp: false };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--help" || a === "-h") {
-      out.showHelp = true;
-    } else if (a === "--verbose" || a === "-v") {
-      out.overrides.verbose = true;
-    } else if (a === "--dry-run") {
-      out.overrides.dryRun = true;
-    } else if (a === "--max-iterations") {
-      const next = argv[++i];
-      const n = next ? Number.parseInt(next, 10) : NaN;
-      if (!Number.isFinite(n) || n < 1) {
-        process.stderr.write(`ralph: --max-iterations expects a positive integer, got '${next}'\n`);
-        process.exit(2);
+interface ParsedArgs {
+  subcommand: "run" | "init" | "doctor" | "archive" | "help";
+  archiveAction?: "ls";
+  workspaceFlags: WorkspaceCliFlags;
+  overrides: ConfigOverrides;
+  createGoalStub: boolean;
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const out: ParsedArgs = {
+    subcommand: "run",
+    workspaceFlags: {},
+    overrides: {},
+    createGoalStub: false,
+  };
+
+  // Optional leading subcommand
+  let i = 0;
+  if (argv[0] && !argv[0].startsWith("-")) {
+    const sub = argv[0];
+    if (sub === "run" || sub === "init" || sub === "doctor") {
+      out.subcommand = sub;
+      i = 1;
+    } else if (sub === "archive") {
+      out.subcommand = "archive";
+      i = 1;
+      if (argv[1] === "ls") {
+        out.archiveAction = "ls";
+        i = 2;
       }
-      out.overrides.maxIterations = n;
-    } else if (a === "--no-review") {
-      out.overrides.reviewEnabled = false;
-    } else if (a === "--review-max-rounds") {
-      const next = argv[++i];
-      const n = next ? Number.parseInt(next, 10) : NaN;
-      if (!Number.isFinite(n) || n < 1) {
-        process.stderr.write(
-          `ralph: --review-max-rounds expects a positive integer, got '${next}'\n`,
-        );
-        process.exit(2);
-      }
-      out.overrides.reviewMaxRounds = n;
-    } else if (a !== undefined && a.startsWith("--")) {
-      process.stderr.write(`ralph: unknown flag '${a}'\n`);
+    } else if (sub === "help") {
+      out.subcommand = "help";
+      return out;
+    } else {
+      process.stderr.write(`ralphloop: unknown subcommand '${sub}'\n`);
       process.exit(2);
+    }
+  }
+
+  for (; i < argv.length; i++) {
+    const a = argv[i]!;
+    const next = (): string => {
+      const v = argv[++i];
+      if (v === undefined) {
+        process.stderr.write(`ralphloop: ${a} requires a value\n`);
+        process.exit(2);
+      }
+      return v;
+    };
+    const nextInt = (): number => {
+      const v = next();
+      const n = Number.parseInt(v, 10);
+      if (!Number.isFinite(n) || n < 1) {
+        process.stderr.write(`ralphloop: ${a} expects a positive integer, got '${v}'\n`);
+        process.exit(2);
+      }
+      return n;
+    };
+
+    switch (a) {
+      case "--help":
+      case "-h":
+        out.subcommand = "help";
+        return out;
+      case "--cwd":
+        out.workspaceFlags.cwd = next();
+        break;
+      case "--workspace":
+        out.workspaceFlags.workspace = next();
+        break;
+      case "--config":
+        out.workspaceFlags.config = next();
+        break;
+      case "--repo":
+        out.workspaceFlags.repo = next();
+        break;
+      case "--goal":
+        out.workspaceFlags.goal = next();
+        out.overrides.goalFile = out.workspaceFlags.goal;
+        break;
+      case "--verbose":
+      case "-v":
+        out.overrides.verbose = true;
+        break;
+      case "--dry-run":
+        out.overrides.dryRun = true;
+        break;
+      case "--max-iterations":
+        out.overrides.maxIterations = nextInt();
+        break;
+      case "--no-review":
+        out.overrides.reviewEnabled = false;
+        break;
+      case "--review-max-rounds":
+        out.overrides.reviewMaxRounds = nextInt();
+        break;
+      case "--create-goal-stub":
+        out.createGoalStub = true;
+        break;
+      default:
+        if (a.startsWith("--")) {
+          process.stderr.write(`ralphloop: unknown flag '${a}'\n`);
+          process.exit(2);
+        }
+        process.stderr.write(`ralphloop: unexpected positional '${a}'\n`);
+        process.exit(2);
     }
   }
   return out;
 }
 
 async function main(): Promise<void> {
-  const flags = parseArgs(process.argv.slice(2));
-  if (flags.showHelp) {
+  const args = parseArgs(process.argv.slice(2));
+  if (args.subcommand === "help") {
     process.stdout.write(HELP);
     process.exit(0);
   }
-  const cfg = loadConfig({ overrides: flags.overrides });
-  const code = await runLoop(cfg);
-  process.exit(code);
+
+  const workspace = resolveWorkspace({ cliFlags: args.workspaceFlags });
+
+  switch (args.subcommand) {
+    case "run": {
+      const cfg = loadConfig({ workspace, overrides: args.overrides });
+      const code = await runLoop(cfg);
+      process.exit(code);
+      break;
+    }
+    case "init": {
+      const result = runInit({
+        cwd: workspace.repoRoot,
+        workspace: workspace.workspaceDir,
+        goal: args.workspaceFlags.goal,
+        createGoalStub: args.createGoalStub,
+      });
+      process.stdout.write(`ralphloop: scaffolded workspace at ${result.workspaceDir}\n`);
+      for (const f of result.created) process.stdout.write(`  + ${f}\n`);
+      for (const f of result.skipped) process.stdout.write(`  · ${f} (kept existing)\n`);
+      process.stdout.write(
+        `\nAdd these lines to your project's .gitignore:\n\n${result.gitignoreSuggestion}\n`,
+      );
+      process.exit(0);
+      break;
+    }
+    case "doctor": {
+      const cfg = loadConfig({ workspace, overrides: args.overrides });
+      runDoctor(cfg, workspace.configPath);
+      break;
+    }
+    case "archive": {
+      if (args.archiveAction !== "ls") {
+        process.stderr.write("ralphloop: archive subcommand requires 'ls'\n");
+        process.exit(2);
+      }
+      const cfg = loadConfig({ workspace, overrides: args.overrides });
+      listArchives(cfg.archiveDir);
+      process.exit(0);
+      break;
+    }
+  }
+}
+
+function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void {
+  const lines: string[] = [];
+  const ok = (label: string, val: string): void => {
+    lines.push(`  ✓ ${label.padEnd(18)} ${val}`);
+  };
+  const warn = (label: string, val: string): void => {
+    lines.push(`  ! ${label.padEnd(18)} ${val}`);
+  };
+
+  lines.push("ralphloop doctor");
+  lines.push("");
+  ok("repoRoot", cfg.repoRoot);
+  ok("workspaceDir", cfg.workspaceDir);
+  ok("configFile", existsSync(configPath) ? configPath : `${configPath} (absent — using defaults)`);
+  ok("goalFile", cfg.goalFile + (existsSync(cfg.goalFile) ? "" : "  (MISSING)"));
+  ok("tasksFile", cfg.tasksFile + (existsSync(cfg.tasksFile) ? "" : "  (MISSING)"));
+  ok("progressFile", cfg.progressFile + (existsSync(cfg.progressFile) ? "" : "  (MISSING)"));
+  ok(
+    "promptFile",
+    cfg.promptFile + (existsSync(cfg.promptFile) ? "" : "  (override absent — using bundled)"),
+  );
+  ok("claudeBin", cfg.claudeBin);
+  ok("claudeModel", cfg.claudeModel);
+  ok(
+    "review",
+    cfg.reviewEnabled ? `enabled (reviewer=${cfg.reviewerModel}, fixer=${cfg.fixerModel})` : "disabled",
+  );
+  ok("maxIterations", String(cfg.maxIterations));
+  ok("stopMarker", cfg.stopMarker);
+  ok("commitPrefixes", `${cfg.commitTaskPrefix}(...) / ${cfg.commitReviewPrefix}(..., round K)`);
+
+  const missing = [cfg.goalFile, cfg.tasksFile, cfg.progressFile].filter((f) => !existsSync(f));
+  if (missing.length > 0) {
+    warn("status", `${missing.length} required file(s) missing — run \`ralphloop init\``);
+  } else {
+    ok("status", "workspace ready");
+  }
+
+  process.stdout.write(lines.join("\n") + "\n");
+  process.exit(missing.length > 0 ? 1 : 0);
+}
+
+function listArchives(archiveDir: string): void {
+  if (!existsSync(archiveDir)) {
+    process.stdout.write(`ralphloop: no archive dir at ${archiveDir}\n`);
+    return;
+  }
+  const files = readdirSync(archiveDir).filter((f) => f.startsWith("progress-")).sort();
+  if (files.length === 0) {
+    process.stdout.write(`ralphloop: ${archiveDir} is empty\n`);
+    return;
+  }
+  for (const f of files) {
+    const full = resolve(archiveDir, f);
+    const st = statSync(full);
+    process.stdout.write(`  ${f}  ${st.size}B  ${st.mtime.toISOString()}\n`);
+  }
 }
 
 main().catch((err: unknown) => {
   const e = err as Error;
-  process.stderr.write(`ralph: fatal: ${e.stack ?? e.message ?? String(err)}\n`);
+  process.stderr.write(`ralphloop: fatal: ${e.stack ?? e.message ?? String(err)}\n`);
   process.exit(1);
 });

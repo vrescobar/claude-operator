@@ -1,0 +1,29 @@
+# Ralphloop consumer config. All fields optional — defaults are documented in
+# the ralphloop README. CLI flags and RALPH_* env vars override values here.
+
+# Project spec (default: GOAL.md at repoRoot)
+# goal: GOAL.md
+
+# Iteration cap (default: 50)
+# maxIterations: 50
+
+# Halt-sentinel the agent writes to progress.md (default: TASK_COMPLETE)
+# stopMarker: TASK_COMPLETE
+
+# Commit-message prefixes (defaults: task / review)
+# commit:
+#   taskPrefix: task
+#   reviewPrefix: review
+
+# Claude CLI binary + model (defaults: claude / claude-sonnet-4-6)
+# claude:
+#   bin: claude
+#   model: claude-sonnet-4-6
+#   timeoutS: 1800
+
+# Reviewer→Fixer sub-loop (default: enabled)
+# review:
+#   enabled: true
+#   reviewerModel: claude-opus-4-7
+#   fixerModel: claude-sonnet-4-6
+#   maxRounds: 5

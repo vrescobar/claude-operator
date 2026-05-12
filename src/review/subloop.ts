@@ -218,9 +218,10 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
       task.id,
       round,
       status,
+      cfg.commitReviewPrefix,
     );
     if (c.ok) {
-      log.stage("git.commit", `review(${task.id}, round ${round}): ${status}`);
+      log.stage("git.commit", `${cfg.commitReviewPrefix}(${task.id}, round ${round}): ${status}`);
     } else {
       log.warn(`commit failed (exit ${c.exitCode}) — leaving working tree dirty`);
     }

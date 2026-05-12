@@ -1,38 +1,51 @@
 /**
- * Resolved ralph runtime configuration.
+ * Resolved ralphloop runtime configuration.
  *
- * Defaults mirror `ralph/loop.sh` exactly, so swapping the bash entry point
- * for `bun ralph/run.ts` does not change behaviour. Every field is overridable
- * via env var (same names as the bash version) or via CLI flag in `run.ts`.
+ * `loadConfig({ workspace, overrides })` layers env vars and CLI overrides on
+ * top of a `WorkspaceResolution` (cwd + `.ralphloop/` paths + an optional
+ * config.yaml). Every field is either externally configurable (CLI flag, env
+ * var, or `.ralphloop/config.yaml`) or derived deterministically from the
+ * workspace dir.
+ *
+ * Precedence (highest first): CLI flag > env var > config.yaml > built-in default.
  */
 
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import type { RalphloopConfigFile, WorkspaceResolution } from "./workspace.js";
+import { resolveWorkspace } from "./workspace.js";
 
 export interface Config {
-  /** Repo root (parent of the ralph directory). */
+  /** Consumer repo root (where GOAL.md lives by default). */
   repoRoot: string;
-  /** Directory containing tasks.md, progress.md, prompt.md, logs/. */
-  ralphDir: string;
-  /** Path to ralph/tasks.md. */
+  /** Workspace directory holding all loop state + content. */
+  workspaceDir: string;
+  /** Project spec file (consumed by the agent, not the loop). */
+  goalFile: string;
+  /** Path to the checklist the loop reads (tasks.md). */
   tasksFile: string;
-  /** Path to ralph/progress.md. */
+  /** Path to the agent's append-only decision log (progress.md). */
   progressFile: string;
-  /** Path to ralph/prompt.md. */
+  /** Path to the iteration prompt (consumer override or bundled default). */
   promptFile: string;
-  /** Path to ralph/logs/. */
+  /** Directory where per-iteration log files land. */
   logsDir: string;
-  /** Path to the lockfile that prevents concurrent runs. */
+  /** Directory where rotated progress archives land. */
+  archiveDir: string;
+  /** Lockfile that prevents concurrent runs. */
   lockFile: string;
-  /** Path to the persisted state file (per-task attempts, counters). */
+  /** Persisted state file (per-task attempts, counters). */
   stateFile: string;
-  /** Path to the per-iteration metrics JSONL file. */
+  /** Per-iteration metrics JSONL file. */
   metricsFile: string;
 
   /** Hard cap on iterations (default 50). */
   maxIterations: number;
   /** Stop marker matched anchored against progress.md (default "TASK_COMPLETE"). */
   stopMarker: string;
+  /** Commit-message prefix for successful task commits (default "task"). */
+  commitTaskPrefix: string;
+  /** Commit-message prefix for review-round commits (default "review"). */
+  commitReviewPrefix: string;
   /** Path or name of the claude binary (default "claude"). */
   claudeBin: string;
   /** Model passed to `claude -p --model …`. */
@@ -96,14 +109,14 @@ export interface Config {
    */
   typecheckEnabled: boolean;
   /**
-   * Logs in `ralph/logs/` older than this many days are pruned at start.
-   * 0 disables pruning. Default 14.
+   * Logs in `<workspaceDir>/logs/` older than this many days are pruned at
+   * start. 0 disables pruning. Default 14.
    */
   logRetentionDays: number;
   /**
    * If `progress.md` exceeds this many bytes, the loop archives the current
-   * file to `progress.archive-<ts>.md` (gitignored) and starts a fresh one
-   * containing only the trailing `progressTailKeepBytes` bytes.
+   * file to `<archiveDir>/progress-<ts>.md` (gitignored) and starts a fresh
+   * one containing only the trailing `progressTailKeepBytes` bytes.
    */
   progressMaxBytes: number;
   progressTailKeepBytes: number;
@@ -126,10 +139,9 @@ export interface Config {
   reviewMaxRounds: number;
   /**
    * Safety cap on *consecutive* rate-limit hits within a single review round
-   * before the round is considered diverged. The sub-loop now retries on RL
-   * indefinitely under this cap (instead of burning a small retry budget
-   * unrelated to the agent's authoring quality), so this only fires if a
-   * reviewer/fixer can't make any forward progress at all. Default 10.
+   * before the round is considered diverged. The sub-loop retries on RL
+   * indefinitely under this cap, so this only fires if a reviewer/fixer can't
+   * make any forward progress at all. Default 10.
    */
   reviewRlMaxConsecutiveHits: number;
   /** Halt the sub-loop after this many consecutive no-op fixer rounds. */
@@ -145,22 +157,20 @@ export interface Config {
   dryRun: boolean;
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-function intEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
+function intEnv(name: string, fallback: number, env: NodeJS.ProcessEnv): number {
+  const raw = env[name];
   if (raw === undefined || raw === "") return fallback;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
-export interface ConfigOverrides {
-  verbose?: boolean;
-  dryRun?: boolean;
-  maxIterations?: number;
-  reviewEnabled?: boolean;
-  reviewMaxRounds?: number;
+function boolEnv(name: string, fallback: boolean, env: NodeJS.ProcessEnv): boolean {
+  const raw = env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const v = raw.toLowerCase();
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  return fallback;
 }
 
 function parseFailResetMode(raw: string | undefined): "stash" | "reset" | "leave" {
@@ -170,68 +180,126 @@ function parseFailResetMode(raw: string | undefined): "stash" | "reset" | "leave
   return "stash";
 }
 
-function boolEnv(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  const v = raw.toLowerCase();
-  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
-  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
-  return fallback;
+export interface ConfigOverrides {
+  verbose?: boolean;
+  dryRun?: boolean;
+  maxIterations?: number;
+  reviewEnabled?: boolean;
+  reviewMaxRounds?: number;
+  /** Override --goal at the CLI level. */
+  goalFile?: string;
+  /** Override --tasks at the CLI level. */
+  tasksFile?: string;
+  /** Override --progress at the CLI level. */
+  progressFile?: string;
+  /** Override --prompt at the CLI level. */
+  promptFile?: string;
 }
 
-export function loadConfig(overrides: ConfigOverrides = {}): Config {
-  // ralph/Config.ts → ralph/ → repo root
-  const ralphDir = resolve(__dirname);
-  const repoRoot = resolve(ralphDir, "..");
+export interface LoadConfigOptions {
+  /** Pre-resolved workspace. If absent, resolveWorkspace() is called with default args. */
+  workspace?: WorkspaceResolution;
+  /** Per-invocation overrides (parsed from CLI flags). */
+  overrides?: ConfigOverrides;
+  /** Override process.env (tests). */
+  env?: NodeJS.ProcessEnv;
+}
 
-  const maxIterations = overrides.maxIterations ?? intEnv("RALPH_MAX_ITERATIONS", 50);
-  const claudeBin = process.env["RALPH_CLAUDE_BIN"] || "claude";
+export function loadConfig(opts: LoadConfigOptions = {}): Config {
+  const workspace = opts.workspace ?? resolveWorkspace();
+  const cfgFile: RalphloopConfigFile = workspace.configData ?? {};
+  const overrides = opts.overrides ?? {};
+  const env = opts.env ?? process.env;
+  const { repoRoot, workspaceDir } = workspace;
+
+  const goalFile = resolve(
+    repoRoot,
+    overrides.goalFile ?? env["RALPH_GOAL_FILE"] ?? cfgFile.goal ?? "GOAL.md",
+  );
+  const tasksFile = resolve(
+    repoRoot,
+    overrides.tasksFile ??
+      env["RALPH_TASKS_FILE"] ??
+      cfgFile.tasks ??
+      resolve(workspaceDir, "tasks.md"),
+  );
+  const progressFile = resolve(
+    repoRoot,
+    overrides.progressFile ??
+      env["RALPH_PROGRESS_FILE"] ??
+      cfgFile.progress ??
+      resolve(workspaceDir, "progress.md"),
+  );
+  const promptFile = resolve(
+    repoRoot,
+    overrides.promptFile ??
+      env["RALPH_PROMPT_FILE"] ??
+      cfgFile.prompt ??
+      resolve(workspaceDir, "prompt.md"),
+  );
+
+  const claudeBin = env["RALPH_CLAUDE_BIN"] || cfgFile.claude?.bin || "claude";
+
+  const maxIterations =
+    overrides.maxIterations ??
+    intEnv("RALPH_MAX_ITERATIONS", cfgFile.maxIterations ?? 50, env);
 
   return {
     repoRoot,
-    ralphDir,
-    tasksFile: resolve(ralphDir, "tasks.md"),
-    progressFile: resolve(ralphDir, "progress.md"),
-    promptFile: resolve(ralphDir, "prompt.md"),
-    logsDir: resolve(ralphDir, "logs"),
-    lockFile: resolve(ralphDir, ".lock"),
-    stateFile: resolve(ralphDir, ".state.json"),
-    metricsFile: resolve(ralphDir, ".metrics.jsonl"),
+    workspaceDir,
+    goalFile,
+    tasksFile,
+    progressFile,
+    promptFile,
+    logsDir: resolve(workspaceDir, "logs"),
+    archiveDir: resolve(workspaceDir, "archive"),
+    lockFile: resolve(workspaceDir, "lock"),
+    stateFile: resolve(workspaceDir, "state.json"),
+    metricsFile: resolve(workspaceDir, "metrics.jsonl"),
 
     maxIterations,
-    stopMarker: process.env["RALPH_STOP_MARKER"] || "TASK_COMPLETE",
+    stopMarker: env["RALPH_STOP_MARKER"] || cfgFile.stopMarker || "TASK_COMPLETE",
+    commitTaskPrefix: env["RALPH_COMMIT_TASK_PREFIX"] || cfgFile.commit?.taskPrefix || "task",
+    commitReviewPrefix:
+      env["RALPH_COMMIT_REVIEW_PREFIX"] || cfgFile.commit?.reviewPrefix || "review",
     claudeBin,
-    claudeModel: process.env["RALPH_CLAUDE_MODEL"] || "claude-sonnet-4-6",
-    claudeTimeoutMs: intEnv("RALPH_CLAUDE_TIMEOUT_S", 1800) * 1000,
-    testTimeoutMs: intEnv("RALPH_TEST_TIMEOUT_S", 600) * 1000,
-    gitTimeoutMs: intEnv("RALPH_GIT_TIMEOUT_S", 60) * 1000,
-    noChangeRetryLimit: intEnv("RALPH_NO_CHANGE_RETRY_LIMIT", 2),
-    taskAttemptLimit: intEnv("RALPH_TASK_ATTEMPT_LIMIT", 5),
-    failResetMode: parseFailResetMode(process.env["RALPH_FAIL_RESET"]),
-    rateLimitFallbackMs: intEnv("RALPH_RATE_LIMIT_FALLBACK_MS", 5 * 60 * 1000),
-    rateLimitFallbackCapMs: intEnv("RALPH_RATE_LIMIT_FALLBACK_CAP_MS", 60 * 60 * 1000),
-    rateLimitJitterMs: intEnv("RALPH_RATE_LIMIT_JITTER_MS", 30_000),
-    minRateLimitSleepMs: intEnv("RALPH_MIN_RATE_LIMIT_SLEEP_MS", 10_000),
-    agentMaxBufferBytes: intEnv("RALPH_AGENT_MAX_BUFFER_BYTES", 50 * 1024 * 1024),
-    typecheckEnabled: boolEnv("RALPH_TYPECHECK_ENABLED", true),
-    logRetentionDays: intEnv("RALPH_LOG_RETENTION_DAYS", 14),
-    progressMaxBytes: intEnv("RALPH_PROGRESS_MAX_BYTES", 64 * 1024),
-    progressTailKeepBytes: intEnv("RALPH_PROGRESS_TAIL_KEEP_BYTES", 8 * 1024),
+    claudeModel: env["RALPH_CLAUDE_MODEL"] || cfgFile.claude?.model || "claude-sonnet-4-6",
+    claudeTimeoutMs:
+      intEnv("RALPH_CLAUDE_TIMEOUT_S", cfgFile.claude?.timeoutS ?? 1800, env) * 1000,
+    testTimeoutMs: intEnv("RALPH_TEST_TIMEOUT_S", 600, env) * 1000,
+    gitTimeoutMs: intEnv("RALPH_GIT_TIMEOUT_S", 60, env) * 1000,
+    noChangeRetryLimit: intEnv("RALPH_NO_CHANGE_RETRY_LIMIT", 2, env),
+    taskAttemptLimit: intEnv("RALPH_TASK_ATTEMPT_LIMIT", 5, env),
+    failResetMode: parseFailResetMode(env["RALPH_FAIL_RESET"]),
+    rateLimitFallbackMs: intEnv("RALPH_RATE_LIMIT_FALLBACK_MS", 5 * 60 * 1000, env),
+    rateLimitFallbackCapMs: intEnv("RALPH_RATE_LIMIT_FALLBACK_CAP_MS", 60 * 60 * 1000, env),
+    rateLimitJitterMs: intEnv("RALPH_RATE_LIMIT_JITTER_MS", 30_000, env),
+    minRateLimitSleepMs: intEnv("RALPH_MIN_RATE_LIMIT_SLEEP_MS", 10_000, env),
+    agentMaxBufferBytes: intEnv("RALPH_AGENT_MAX_BUFFER_BYTES", 50 * 1024 * 1024, env),
+    typecheckEnabled: boolEnv("RALPH_TYPECHECK_ENABLED", true, env),
+    logRetentionDays: intEnv("RALPH_LOG_RETENTION_DAYS", 14, env),
+    progressMaxBytes: intEnv("RALPH_PROGRESS_MAX_BYTES", 64 * 1024, env),
+    progressTailKeepBytes: intEnv("RALPH_PROGRESS_TAIL_KEEP_BYTES", 8 * 1024, env),
 
-    reviewEnabled: overrides.reviewEnabled ?? boolEnv("RALPH_REVIEW_ENABLED", true),
-    reviewerBin: process.env["RALPH_REVIEWER_BIN"] || claudeBin,
-    reviewerModel: process.env["RALPH_REVIEWER_MODEL"] || "claude-opus-4-7",
-    reviewerTimeoutMs: intEnv("RALPH_REVIEWER_TIMEOUT_S", 600) * 1000,
-    fixerBin: process.env["RALPH_FIXER_BIN"] || claudeBin,
-    fixerModel: process.env["RALPH_FIXER_MODEL"] || "claude-sonnet-4-6",
-    fixerTimeoutMs: intEnv("RALPH_FIXER_TIMEOUT_S", 600) * 1000,
-    reviewMaxRounds: overrides.reviewMaxRounds ?? intEnv("RALPH_REVIEW_MAX_ROUNDS", 5),
+    reviewEnabled:
+      overrides.reviewEnabled ??
+      boolEnv("RALPH_REVIEW_ENABLED", cfgFile.review?.enabled ?? true, env),
+    reviewerBin: env["RALPH_REVIEWER_BIN"] || cfgFile.review?.reviewerBin || claudeBin,
+    reviewerModel:
+      env["RALPH_REVIEWER_MODEL"] || cfgFile.review?.reviewerModel || "claude-opus-4-7",
+    reviewerTimeoutMs: intEnv("RALPH_REVIEWER_TIMEOUT_S", 600, env) * 1000,
+    fixerBin: env["RALPH_FIXER_BIN"] || cfgFile.review?.fixerBin || claudeBin,
+    fixerModel: env["RALPH_FIXER_MODEL"] || cfgFile.review?.fixerModel || "claude-sonnet-4-6",
+    fixerTimeoutMs: intEnv("RALPH_FIXER_TIMEOUT_S", 600, env) * 1000,
+    reviewMaxRounds:
+      overrides.reviewMaxRounds ??
+      intEnv("RALPH_REVIEW_MAX_ROUNDS", cfgFile.review?.maxRounds ?? 5, env),
     // The env var keeps its old name for backwards-compat with existing
     // operator configs; semantics are documented on the Config field.
-    reviewRlMaxConsecutiveHits: intEnv("RALPH_REVIEW_RL_RETRIES_PER_ROUND", 10),
-    reviewMaxNoOpRounds: intEnv("RALPH_REVIEW_MAX_NOOP_ROUNDS", 2),
-    reviewMaxRepeatDiffRounds: intEnv("RALPH_REVIEW_MAX_REPEAT_DIFF_ROUNDS", 2),
-    reviewMaxReviewerFailures: intEnv("RALPH_REVIEW_MAX_REVIEWER_FAILURES", 2),
+    reviewRlMaxConsecutiveHits: intEnv("RALPH_REVIEW_RL_RETRIES_PER_ROUND", 10, env),
+    reviewMaxNoOpRounds: intEnv("RALPH_REVIEW_MAX_NOOP_ROUNDS", 2, env),
+    reviewMaxRepeatDiffRounds: intEnv("RALPH_REVIEW_MAX_REPEAT_DIFF_ROUNDS", 2, env),
+    reviewMaxReviewerFailures: intEnv("RALPH_REVIEW_MAX_REVIEWER_FAILURES", 2, env),
 
     verbose: overrides.verbose ?? false,
     dryRun: overrides.dryRun ?? false,

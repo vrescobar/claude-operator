@@ -7,7 +7,7 @@
  * elsewhere in the file, and we must NOT halt on those false positives.
  */
 
-import { existsSync, readFileSync, renameSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { atomicWriteFileSync } from "./atomic.js";
 
@@ -32,10 +32,13 @@ function escapeRe(s: string): string {
 
 /**
  * Rotate `progress.md` when it grows beyond `maxBytes`. The current file is
- * archived to `progress.archive-<ts>.md` (gitignored) and replaced with a
+ * archived to `<archiveDir>/progress-<ts>.md` (gitignored) and replaced with a
  * stub that contains the trailing `tailKeepBytes` (so the agent still sees
  * the most recent decisions). No-op when the file is below the threshold or
  * the archive path can't be created.
+ *
+ * When `archiveDir` is omitted, archives land next to `path` (legacy
+ * behaviour) under the name `progress.archive-<ts>.md`.
  *
  * Returns the archive path when a rotation happened, or null otherwise.
  */
@@ -44,6 +47,7 @@ export function rotateProgressIfTooLarge(
   maxBytes: number,
   tailKeepBytes: number,
   now: () => Date = () => new Date(),
+  archiveDir?: string,
 ): string | null {
   if (maxBytes <= 0) return null;
   if (!existsSync(path)) return null;
@@ -60,7 +64,9 @@ export function rotateProgressIfTooLarge(
     .replace(/[:.]/g, "-")
     .replace("T", "-")
     .replace("Z", "");
-  const archive = resolve(dirname(path), `progress.archive-${ts}.md`);
+  const archive = archiveDir
+    ? resolve(archiveDir, `progress-${ts}.md`)
+    : resolve(dirname(path), `progress.archive-${ts}.md`);
   const original = readFileSync(path, "utf8");
   const tail = tailKeepBytes > 0 ? original.slice(-tailKeepBytes) : "";
   const stub =
@@ -69,6 +75,13 @@ export function rotateProgressIfTooLarge(
     `(${size} bytes). Showing tail only.\n\n` +
     tail;
 
+  if (archiveDir) {
+    try {
+      mkdirSync(archiveDir, { recursive: true });
+    } catch {
+      return null;
+    }
+  }
   try {
     renameSync(path, archive);
   } catch {

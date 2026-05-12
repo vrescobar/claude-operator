@@ -105,6 +105,8 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
     cfg.progressFile,
     cfg.progressMaxBytes,
     cfg.progressTailKeepBytes,
+    () => new Date(),
+    cfg.archiveDir,
   );
   if (archived) {
     process.stdout.write(`ralph: progress.md rotated → ${archived}\n`);
@@ -497,6 +499,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
       { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs },
       task.id,
       task.title,
+      cfg.commitTaskPrefix,
     );
     if (!c.ok) {
       log.warn(`commit failed (exit ${c.exitCode}) — reverting #${task.id} → [ ]`);
@@ -505,7 +508,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
       return "tests-failed";
     }
     ctx.state.counters.committed++;
-    log.done(`committed task(${task.id}): ${task.title}`);
+    log.done(`committed ${cfg.commitTaskPrefix}(${task.id}): ${task.title}`);
 
     if (cfg.reviewEnabled) {
       const originalSha = await currentHeadSha({

@@ -117,12 +117,13 @@ export async function commitTask(
   opts: GitOpsOptions,
   taskId: string,
   taskTitle: string,
+  prefix = "task",
 ): Promise<CommitResult> {
   const add = await git(opts, ["add", "-A"]);
   if (add.exitCode !== 0) {
     return { ok: false, exitCode: add.exitCode, stderr: add.stderr };
   }
-  const msg = `task(${taskId}): ${taskTitle}\n\nCompleted by Ralph autonomous loop.`;
+  const msg = `${prefix}(${taskId}): ${taskTitle}\n\nCompleted by Ralph autonomous loop.`;
   const commit = await git(opts, ["commit", "--no-verify", "-m", msg]);
   return {
     ok: commit.exitCode === 0,
@@ -202,13 +203,14 @@ export async function commitReviewRound(
   taskId: string,
   round: number,
   status: string,
+  prefix = "review",
 ): Promise<CommitResult> {
   const add = await git(opts, ["add", "-A"]);
   if (add.exitCode !== 0) {
     return { ok: false, exitCode: add.exitCode, stderr: add.stderr };
   }
   const msg =
-    `review(${taskId}, round ${round}): ${status}\n\n` +
+    `${prefix}(${taskId}, round ${round}): ${status}\n\n` +
     `Applied by Ralph autonomous review sub-loop.`;
   const commit = await git(opts, ["commit", "--no-verify", "-m", msg]);
   return {

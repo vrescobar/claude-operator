@@ -13,21 +13,21 @@ const FAKE_CLAUDE = resolve(__dir, "fixtures", "bin", "fake-claude");
 
 function setup(failResetMode: "stash" | "reset" | "leave"): { cfg: Config; root: string } {
   const root = mkdtempSync(resolve(tmpdir(), "ralph-drift-"));
-  const ralphDir = resolve(root, "ralph");
-  mkdirSync(ralphDir);
-  mkdirSync(resolve(ralphDir, "logs"), { recursive: true });
+  const workspaceDir = resolve(root, ".ralphloop");
+  mkdirSync(workspaceDir, { recursive: true });
+  mkdirSync(resolve(workspaceDir, "logs"), { recursive: true });
 
   writeFileSync(
-    resolve(ralphDir, "tasks.md"),
+    resolve(workspaceDir, "tasks.md"),
     "## Phase X\n- [ ] **77** Drift task\n",
   );
-  writeFileSync(resolve(ralphDir, "progress.md"), "# notes\n");
-  writeFileSync(resolve(ralphDir, "prompt.md"), "you are a test agent.\n");
+  writeFileSync(resolve(workspaceDir, "progress.md"), "# notes\n");
+  writeFileSync(resolve(workspaceDir, "prompt.md"), "you are a test agent.\n");
   writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "smoke" }));
   // Mirror real project .gitignore so ralph runtime files don't pollute status.
   writeFileSync(
     resolve(root, ".gitignore"),
-    "ralph/.lock\nralph/.state.json\nralph/.metrics.jsonl\nralph/logs/*.log\n",
+    ".ralphloop/lock\n.ralphloop/state.json\n.ralphloop/state.json.tmp\n.ralphloop/metrics.jsonl\n.ralphloop/logs/\n.ralphloop/archive/\n",
   );
 
   execaSync("git", ["init", "-q"], { cwd: root });
@@ -38,14 +38,18 @@ function setup(failResetMode: "stash" | "reset" | "leave"): { cfg: Config; root:
 
   const cfg: Config = {
     repoRoot: root,
-    ralphDir,
-    tasksFile: resolve(ralphDir, "tasks.md"),
-    progressFile: resolve(ralphDir, "progress.md"),
-    promptFile: resolve(ralphDir, "prompt.md"),
-    logsDir: resolve(ralphDir, "logs"),
-    lockFile: resolve(ralphDir, ".lock"),
-    stateFile: resolve(ralphDir, ".state.json"),
-    metricsFile: resolve(ralphDir, ".metrics.jsonl"),
+    workspaceDir,
+    goalFile: resolve(root, "GOAL.md"),
+    archiveDir: resolve(workspaceDir, "archive"),
+    commitTaskPrefix: "task",
+    commitReviewPrefix: "review",
+    tasksFile: resolve(workspaceDir, "tasks.md"),
+    progressFile: resolve(workspaceDir, "progress.md"),
+    promptFile: resolve(workspaceDir, "prompt.md"),
+    logsDir: resolve(workspaceDir, "logs"),
+    lockFile: resolve(workspaceDir, "lock"),
+    stateFile: resolve(workspaceDir, "state.json"),
+    metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 1,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
@@ -89,7 +93,7 @@ function makeAgent(root: string) {
     _logFile: string,
     _onLine: (s: "stdout" | "stderr", l: string) => void,
   ): AgentProcess => {
-    const tasksPath = resolve(root, "ralph/tasks.md");
+    const tasksPath = resolve(root, ".ralphloop/tasks.md");
     const before = readFileSync(tasksPath, "utf8");
     writeFileSync(tasksPath, before.replace("- [ ] **77**", "- [x] **77**"));
     // Touch a tracked-style file so dirty=true.
@@ -123,7 +127,7 @@ describe("working-tree drift cleanup", () => {
     expect(stash).toContain("ralph-fail/tests-failed/task-77");
 
     // Tasks.md must show the task reverted to [ ].
-    const tasks = readFileSync(resolve(root, "ralph/tasks.md"), "utf8");
+    const tasks = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
     expect(tasks).toContain("- [ ] **77**");
     // drift.ts should NOT be present in the working tree (it's in the stash).
     expect(existsSync(resolve(root, "drift.ts"))).toBe(false);

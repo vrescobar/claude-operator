@@ -106,7 +106,7 @@ async function main(): Promise<void> {
     process.stdout.write(HELP);
     process.exit(0);
   }
-  const cfg = loadConfig(flags.overrides);
+  const cfg = loadConfig({ overrides: flags.overrides });
   const code = await runLoop(cfg);
   process.exit(code);
 }

@@ -42,20 +42,20 @@ interface Sandbox {
 
 function setupSandbox(maxIterations: number): Sandbox {
   const root = mkdtempSync(resolve(tmpdir(), "ralph-divergence-"));
-  const ralphDir = resolve(root, "ralph");
-  mkdirSync(ralphDir);
-  mkdirSync(resolve(ralphDir, "logs"), { recursive: true });
+  const workspaceDir = resolve(root, ".ralphloop");
+  mkdirSync(workspaceDir, { recursive: true });
+  mkdirSync(resolve(workspaceDir, "logs"), { recursive: true });
 
   writeFileSync(
-    resolve(ralphDir, "tasks.md"),
+    resolve(workspaceDir, "tasks.md"),
     "## Phase X\n- [ ] **77** Divergence-recovery task\n",
   );
-  writeFileSync(resolve(ralphDir, "progress.md"), "# notes\n");
-  writeFileSync(resolve(ralphDir, "prompt.md"), "you are a test agent.\n");
+  writeFileSync(resolve(workspaceDir, "progress.md"), "# notes\n");
+  writeFileSync(resolve(workspaceDir, "prompt.md"), "you are a test agent.\n");
   writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "div" }));
   writeFileSync(
     resolve(root, ".gitignore"),
-    "ralph/.lock\nralph/.state.json\nralph/.metrics.jsonl\nralph/logs/*.log\n",
+    ".ralphloop/lock\n.ralphloop/state.json\n.ralphloop/state.json.tmp\n.ralphloop/metrics.jsonl\n.ralphloop/logs/\n.ralphloop/archive/\n",
   );
 
   execaSync("git", ["init", "-q"], { cwd: root });
@@ -66,14 +66,18 @@ function setupSandbox(maxIterations: number): Sandbox {
 
   const cfg: Config = {
     repoRoot: root,
-    ralphDir,
-    tasksFile: resolve(ralphDir, "tasks.md"),
-    progressFile: resolve(ralphDir, "progress.md"),
-    promptFile: resolve(ralphDir, "prompt.md"),
-    logsDir: resolve(ralphDir, "logs"),
-    lockFile: resolve(ralphDir, ".lock"),
-    stateFile: resolve(ralphDir, ".state.json"),
-    metricsFile: resolve(ralphDir, ".metrics.jsonl"),
+    workspaceDir,
+    goalFile: resolve(root, "GOAL.md"),
+    archiveDir: resolve(workspaceDir, "archive"),
+    commitTaskPrefix: "task",
+    commitReviewPrefix: "review",
+    tasksFile: resolve(workspaceDir, "tasks.md"),
+    progressFile: resolve(workspaceDir, "progress.md"),
+    promptFile: resolve(workspaceDir, "prompt.md"),
+    logsDir: resolve(workspaceDir, "logs"),
+    lockFile: resolve(workspaceDir, "lock"),
+    stateFile: resolve(workspaceDir, "state.json"),
+    metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
@@ -124,7 +128,7 @@ function makeAgentFactoryWithFlag(root: string, flag: { mainJustRan: boolean }) 
     _onLine: (s: "stdout" | "stderr", l: string) => void,
   ): AgentProcess => {
     flag.mainJustRan = true;
-    const tasksPath = resolve(root, "ralph/tasks.md");
+    const tasksPath = resolve(root, ".ralphloop/tasks.md");
     const before = readFileSync(tasksPath, "utf8");
     writeFileSync(tasksPath, before.replace("- [ ] **77**", "- [x] **77**"));
     writeFileSync(resolve(root, "subject.ts"), "export const x = 1;\n");
@@ -203,7 +207,7 @@ describe("review sub-loop divergence recovery", () => {
       expect(log.stdout).toContain("init");
 
       // Task is back to `[ ]` so a future ralph run picks it up again.
-      const tasks = readFileSync(resolve(root, "ralph/tasks.md"), "utf8");
+      const tasks = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
       expect(tasks).toContain("- [ ] **77**");
       expect(tasks).not.toContain("- [x] **77**");
 

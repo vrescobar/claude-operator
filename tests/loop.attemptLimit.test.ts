@@ -13,12 +13,12 @@ const FAKE_CLAUDE = resolve(__dir, "fixtures", "bin", "fake-claude");
 
 function setup(): { cfg: Config; root: string } {
   const root = mkdtempSync(resolve(tmpdir(), "ralph-attempt-cap-"));
-  const ralphDir = resolve(root, "ralph");
-  mkdirSync(ralphDir);
-  mkdirSync(resolve(ralphDir, "logs"), { recursive: true });
+  const workspaceDir = resolve(root, ".ralphloop");
+  mkdirSync(workspaceDir, { recursive: true });
+  mkdirSync(resolve(workspaceDir, "logs"), { recursive: true });
 
   writeFileSync(
-    resolve(ralphDir, "tasks.md"),
+    resolve(workspaceDir, "tasks.md"),
     [
       "## Phase X",
       "- [ ] **77** Always-fails task",
@@ -26,8 +26,8 @@ function setup(): { cfg: Config; root: string } {
       "",
     ].join("\n"),
   );
-  writeFileSync(resolve(ralphDir, "progress.md"), "# notes\n");
-  writeFileSync(resolve(ralphDir, "prompt.md"), "you are a test agent.\n");
+  writeFileSync(resolve(workspaceDir, "progress.md"), "# notes\n");
+  writeFileSync(resolve(workspaceDir, "prompt.md"), "you are a test agent.\n");
   writeFileSync(resolve(root, "package.json"), JSON.stringify({ name: "smoke" }));
 
   execaSync("git", ["init", "-q"], { cwd: root });
@@ -38,14 +38,18 @@ function setup(): { cfg: Config; root: string } {
 
   const cfg: Config = {
     repoRoot: root,
-    ralphDir,
-    tasksFile: resolve(ralphDir, "tasks.md"),
-    progressFile: resolve(ralphDir, "progress.md"),
-    promptFile: resolve(ralphDir, "prompt.md"),
-    logsDir: resolve(ralphDir, "logs"),
-    lockFile: resolve(ralphDir, ".lock"),
-    stateFile: resolve(ralphDir, ".state.json"),
-    metricsFile: resolve(ralphDir, ".metrics.jsonl"),
+    workspaceDir,
+    goalFile: resolve(root, "GOAL.md"),
+    archiveDir: resolve(workspaceDir, "archive"),
+    commitTaskPrefix: "task",
+    commitReviewPrefix: "review",
+    tasksFile: resolve(workspaceDir, "tasks.md"),
+    progressFile: resolve(workspaceDir, "progress.md"),
+    promptFile: resolve(workspaceDir, "prompt.md"),
+    logsDir: resolve(workspaceDir, "logs"),
+    lockFile: resolve(workspaceDir, "lock"),
+    stateFile: resolve(workspaceDir, "state.json"),
+    metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 10,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
@@ -119,15 +123,15 @@ describe("ralph loop — attempt limit", () => {
     expect(agentCalls).toBeGreaterThan(cfg.taskAttemptLimit);
 
     // Task 77 must be marked [!] in tasks.md and isTaskBlocked must agree.
-    const after = readFileSync(resolve(root, "ralph/tasks.md"), "utf8");
+    const after = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
     expect(after).toContain("- [!] **77** Always-fails task");
 
     // Progress note must record the block.
-    const progress = readFileSync(resolve(root, "ralph/progress.md"), "utf8");
+    const progress = readFileSync(resolve(root, ".ralphloop/progress.md"), "utf8");
     expect(progress).toContain("task #77 blocked");
 
     // Persistent state should reflect attempts >= limit and blocked=true.
-    const state = JSON.parse(readFileSync(resolve(root, "ralph/.state.json"), "utf8"));
+    const state = JSON.parse(readFileSync(resolve(root, ".ralphloop/state.json"), "utf8"));
     expect(state.tasks["77"].attempts).toBeGreaterThanOrEqual(cfg.taskAttemptLimit);
     expect(state.tasks["77"].blocked).toBe(true);
     expect(state.counters.blocked).toBeGreaterThanOrEqual(1);

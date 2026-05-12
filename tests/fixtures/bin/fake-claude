@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Fake `claude` shim used by ralph tests.
+#
+# Behaviour controlled via env vars:
+#   FAKE_CLAUDE_OUT      multi-line text printed to stdout (\n literal allowed)
+#   FAKE_CLAUDE_ERR      multi-line text printed to stderr
+#   FAKE_CLAUDE_EXIT     exit code (default 0)
+#   FAKE_CLAUDE_SLEEP    seconds to sleep before exit (default 0)
+#   FAKE_CLAUDE_ECHO_STDIN  if "1", echo whatever appears on stdin to stdout
+#   FAKE_CLAUDE_RATE_LIMIT  optional pre-canned rate-limit message appended to stdout
+#
+# Mirrors single-binary claude semantics: signals delivered to this script
+# kill the script directly. We use `exec sleep` (not `sleep` as a child)
+# so SIGTERM during the sleep terminates this process, matching what would
+# happen if `sleep` were the real `claude` binary itself.
+
+set -u
+
+# Ignore all flags — tests don't pin them.
+
+if [ -n "${FAKE_CLAUDE_OUT:-}" ]; then
+  printf '%b\n' "$FAKE_CLAUDE_OUT"
+fi
+
+if [ -n "${FAKE_CLAUDE_ECHO_STDIN:-}" ] && [ "$FAKE_CLAUDE_ECHO_STDIN" = "1" ]; then
+  while IFS= read -r line; do
+    printf 'STDIN> %s\n' "$line"
+  done
+  # Surface a possible final partial line that didn't end with \n.
+  if [ -n "${REPLY:-}" ]; then
+    printf 'STDIN> %s\n' "$REPLY"
+  fi
+fi
+
+if [ -n "${FAKE_CLAUDE_RATE_LIMIT:-}" ]; then
+  printf '%s\n' "$FAKE_CLAUDE_RATE_LIMIT"
+fi
+
+if [ -n "${FAKE_CLAUDE_ERR:-}" ]; then
+  printf '%b\n' "$FAKE_CLAUDE_ERR" >&2
+fi
+
+if [ -n "${FAKE_CLAUDE_SLEEP:-}" ] && [ "$FAKE_CLAUDE_SLEEP" != "0" ]; then
+  # `exec` replaces this bash process with sleep so SIGTERM/SIGKILL
+  # terminates *this* PID directly — same as a single-binary claude.
+  exec sleep "$FAKE_CLAUDE_SLEEP"
+fi
+
+exit "${FAKE_CLAUDE_EXIT:-0}"

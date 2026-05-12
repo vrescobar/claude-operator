@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Fake fixer shim used by ralph review-subloop tests.
+#
+# Behaviour controlled via env vars:
+#   FAKE_FIXER_TOUCH       relative path of a file to mutate (touched/appended)
+#   FAKE_FIXER_LINE        text appended to the file (default "// fixed by fake-fixer")
+#   FAKE_FIXER_RATE_LIMIT  optional rate-limit message to print on stdout
+#   FAKE_FIXER_EXIT        exit code (default 0)
+#
+# All CLI flags are ignored. Stdin is read but discarded.
+
+set -u
+cat >/dev/null  # discard prompt on stdin
+
+if [ -n "${FAKE_FIXER_TOUCH:-}" ]; then
+  line="${FAKE_FIXER_LINE:-// fixed by fake-fixer}"
+  printf '%s\n' "$line" >> "$FAKE_FIXER_TOUCH"
+  echo "fake-fixer: appended to $FAKE_FIXER_TOUCH"
+fi
+
+if [ -n "${FAKE_FIXER_RATE_LIMIT:-}" ]; then
+  echo "$FAKE_FIXER_RATE_LIMIT"
+fi
+
+exit "${FAKE_FIXER_EXIT:-0}"

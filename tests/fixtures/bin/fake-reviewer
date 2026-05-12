@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fake reviewer shim used by ralph review-subloop tests.
+#
+# Behaviour controlled via env vars:
+#   FAKE_REVIEWER_VERDICT     APPROVE | NEEDS_CHANGES (required)
+#   FAKE_REVIEWER_BLOCKERS    integer; how many [blocker] bullets to emit (default 0)
+#   FAKE_REVIEWER_TESTS       integer; how many test bullets to emit (default 0)
+#   FAKE_REVIEWER_RATE_LIMIT  optional rate-limit message to append before VERDICT
+#   FAKE_REVIEWER_EXIT        exit code (default 0)
+#
+# All CLI flags are ignored. Stdin is read but discarded.
+
+set -u
+cat >/dev/null  # discard prompt on stdin
+
+verdict="${FAKE_REVIEWER_VERDICT:-APPROVE}"
+blockers="${FAKE_REVIEWER_BLOCKERS:-0}"
+tests="${FAKE_REVIEWER_TESTS:-0}"
+
+echo "## Issues to fix"
+i=0
+while [ "$i" -lt "$blockers" ]; do
+  i=$((i + 1))
+  echo "- **[blocker]** src/fake.ts:$i — fake blocker #$i"
+done
+
+echo
+echo "## Test cases worth adding"
+i=0
+while [ "$i" -lt "$tests" ]; do
+  i=$((i + 1))
+  echo "- tests/fake.test.ts — fake test case #$i"
+done
+
+if [ -n "${FAKE_REVIEWER_RATE_LIMIT:-}" ]; then
+  echo
+  echo "$FAKE_REVIEWER_RATE_LIMIT"
+fi
+
+echo
+echo "VERDICT: $verdict"
+
+exit "${FAKE_REVIEWER_EXIT:-0}"

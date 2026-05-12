@@ -75,7 +75,11 @@ export async function runReviewer(opts: RunReviewerOptions): Promise<ReviewerOut
     registerAgent(agent);
     try {
       const result = await agent.run(prompt);
-      return { result, report: result.stdout };
+      // `text` is the parsed final assistant message in stream-json mode,
+      // and equals `stdout` when the agent ran in plain-text mode (e.g.
+      // fake-claude in tests). Using `text` keeps the reviewer report free
+      // of stream-json envelope lines that would otherwise need stripping.
+      return { result, report: result.text };
     } finally {
       clearAgent();
     }

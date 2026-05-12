@@ -23,24 +23,79 @@ export interface RateLimitInfo {
   reason: string;
 }
 
+/**
+ * Token / cost usage for one agent invocation. Populated when claude is
+ * invoked with `--output-format stream-json` and the final `result` event is
+ * parsed; null when the run produced plain-text output (e.g. fake-claude in
+ * tests, or stream-json parsing failed).
+ *
+ * Fields mirror the `usage` block emitted by `claude --print --output-format
+ * stream-json` so callers can map straight to the public Anthropic billing
+ * shape without bespoke math.
+ */
+export interface AgentUsage {
+  /** Net new input tokens (not counting cache reads/creations). */
+  inputTokens: number;
+  /** Output tokens emitted by the model. */
+  outputTokens: number;
+  /** Tokens served from a prior prompt cache (cheap reads). */
+  cacheReadInputTokens: number;
+  /** Tokens that wrote into the prompt cache during this run. */
+  cacheCreationInputTokens: number;
+}
+
 /** Result of one `AgentProcess.run(prompt)` invocation. */
 export interface AgentResult {
   /** Process exit code; null when the process was killed before exit. */
   exitCode: number | null;
   /** Signal name when killed; null otherwise. */
   signal: NodeJS.Signals | null;
-  /** Full captured stdout. */
+  /** Full captured stdout (raw — in stream-json mode this is JSON-per-line). */
   stdout: string;
   /** Full captured stderr. */
   stderr: string;
-  /** Wall-clock duration in milliseconds. */
+  /**
+   * Final assistant text. In stream-json mode this is the `result` field of
+   * the trailing `result` event (i.e. the agent's last assistant message).
+   * In plain-text mode it equals `stdout`. Reviewer/fixer callers should read
+   * `text`, not `stdout`, so the format switch stays a one-class change.
+   */
+  text: string;
+  /** Wall-clock duration in milliseconds (measured by the loop driver). */
   durationMs: number;
+  /**
+   * API-side duration claude reports in its `result` event — excludes
+   * tool execution time. Null when not available (text mode, parse failure).
+   */
+  apiDurationMs: number | null;
+  /** Total cost in USD reported by claude. Null when not available. */
+  costUsd: number | null;
+  /** Number of agent turns / tool-use cycles. Null when not available. */
+  numTurns: number | null;
+  /** Token usage breakdown. Null when not available. */
+  usage: AgentUsage | null;
   /** True iff the timeout fired and the process was terminated by it. */
   timedOut: boolean;
   /** True iff `kill()` was called externally. */
   killed: boolean;
   /** Populated when rate-limit text was detected in stdout/stderr. */
   rateLimit: RateLimitInfo | null;
+}
+
+/** Zero-initialised usage block — useful when summing across rounds. */
+export function emptyUsage(): AgentUsage {
+  return { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+}
+
+/** Sum two usage blocks. Null operands are treated as zero. */
+export function addUsage(a: AgentUsage | null, b: AgentUsage | null): AgentUsage {
+  return {
+    inputTokens: (a?.inputTokens ?? 0) + (b?.inputTokens ?? 0),
+    outputTokens: (a?.outputTokens ?? 0) + (b?.outputTokens ?? 0),
+    cacheReadInputTokens: (a?.cacheReadInputTokens ?? 0) + (b?.cacheReadInputTokens ?? 0),
+    cacheCreationInputTokens:
+      (a?.cacheCreationInputTokens ?? 0) + (b?.cacheCreationInputTokens ?? 0),
+  };
 }
 
 /** Outcome of a single loop iteration — used by tests + the smoke runner. */

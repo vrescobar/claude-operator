@@ -20,11 +20,11 @@ import type { Config } from "../Config.js";
 import { commitReviewRound, hasChanges } from "../GitOps.js";
 import { humanDuration, type Logger } from "../Logger.js";
 import { computeSleepUntil, sleepUntil } from "../RateLimit.js";
-import type { TaskRef, TestRunResult } from "../types.js";
+import { addUsage, type AgentResult, type TaskRef, type TestRunResult } from "../types.js";
 import { runFixer, type RunFixerOptions } from "./Fixer.js";
 import { countItems, parseVerdict } from "./parseReport.js";
 import { runReviewer, type RunReviewerOptions } from "./Reviewer.js";
-import type { ReviewVerdict, SubloopOutcome } from "./types.js";
+import { emptySubloopUsage, type ReviewVerdict, type SubloopOutcome, type SubloopUsage } from "./types.js";
 
 /**
  * @deprecated The sub-loop no longer throws this. It returns
@@ -83,6 +83,25 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
   // the diverged outcome so the outer loop knows whether it can keep the
   // partial review chain or has to reset to the original SHA.
   let lastTests: TestRunResult | null = null;
+  // Token / cost / time totals accumulated across every reviewer + fixer
+  // call in this sub-loop. Surfaced on every SubloopOutcome variant so the
+  // outer loop's metrics writer can record the full sub-loop spend without
+  // recomputing anything.
+  const usage: SubloopUsage = emptySubloopUsage();
+
+  const accumulate = (which: "reviewer" | "fixer", r: AgentResult): void => {
+    if (which === "reviewer") {
+      usage.reviewerUsage = addUsage(usage.reviewerUsage, r.usage);
+      usage.reviewerCostUsd += r.costUsd ?? 0;
+      usage.reviewerDurationMs += r.durationMs;
+      usage.reviewerApiDurationMs += r.apiDurationMs ?? 0;
+    } else {
+      usage.fixerUsage = addUsage(usage.fixerUsage, r.usage);
+      usage.fixerCostUsd += r.costUsd ?? 0;
+      usage.fixerDurationMs += r.durationMs;
+      usage.fixerApiDurationMs += r.apiDurationMs ?? 0;
+    }
+  };
 
   const diverge = (reason: string, rounds: number): SubloopOutcome => {
     log.warn(`review sub-loop diverged for task #${task.id}: ${reason}`);
@@ -91,6 +110,7 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
       reason,
       rounds,
       testsOkAtEnd: lastTests?.ok ?? false,
+      usage,
     };
   };
 
@@ -112,6 +132,8 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
       );
     }
     const { result: reviewerResult, report } = reviewerOutcome;
+    accumulate("reviewer", reviewerResult);
+    logUsageLine(log, "reviewer", reviewerResult);
 
     // Reviewer crash / unparseable verdict / empty report → reviewer-failed.
     // Two such failures in a row halt the sub-loop instead of feeding the
@@ -149,7 +171,8 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
     // 3. Convergence check.
     if (verdictTag === "APPROVE" && tests.ok) {
       log.stage("review.converged", `after ${round - 1} fix round(s)`);
-      return { kind: "converged", rounds: round };
+      logSubloopTotal(log, usage);
+      return { kind: "converged", rounds: round, usage };
     }
 
     // 4. Fixer (Sonnet) with the report. Even on APPROVE we still invoke the
@@ -170,6 +193,8 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
       );
     }
     const { result: fixerResult } = fixerOutcome;
+    accumulate("fixer", fixerResult);
+    logUsageLine(log, "fixer", fixerResult);
     if (fixerResult.timedOut || fixerResult.exitCode !== 0) {
       log.warn(
         `fixer failed (code=${fixerResult.exitCode}) — next round's reviewer will see the broken state`,
@@ -227,9 +252,46 @@ export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome>
     }
   }
 
+  logSubloopTotal(log, usage);
   return diverge(
     `review sub-loop did not converge after ${cfg.reviewMaxRounds} rounds`,
     cfg.reviewMaxRounds,
+  );
+}
+
+/**
+ * One-line per-call usage trace. Lives on the operator's terminal so they
+ * can see at a glance "round 2 reviewer cost $0.12, fixer cost $0.04" without
+ * grepping `metrics.jsonl`. Skipped entirely when claude ran in plain-text
+ * mode (fake-claude in tests): no usage data → no line.
+ */
+function logUsageLine(log: Logger, kind: "reviewer" | "fixer", r: AgentResult): void {
+  if (!r.usage && r.costUsd == null) return;
+  const u = r.usage;
+  const wall = humanDuration(r.durationMs);
+  const api = r.apiDurationMs != null ? humanDuration(r.apiDurationMs) : "?";
+  const cost = r.costUsd != null ? `$${r.costUsd.toFixed(4)}` : "$?";
+  const tokens = u
+    ? `in=${u.inputTokens} out=${u.outputTokens} cache-r=${u.cacheReadInputTokens} cache-c=${u.cacheCreationInputTokens}`
+    : "n/a";
+  log.detail(`${kind} usage`, `${tokens} cost=${cost} wall=${wall} api=${api}`);
+}
+
+/**
+ * Sub-loop close-out line: cumulative reviewer + fixer spend. Emitted right
+ * before `runReviewSubloop` returns so it always pairs with the per-round
+ * usage lines. Caller can decide whether to also emit the same totals on the
+ * iteration's final summary line — they're already part of `SubloopOutcome`.
+ */
+function logSubloopTotal(log: Logger, u: SubloopUsage): void {
+  const totalCost = u.reviewerCostUsd + u.fixerCostUsd;
+  const totalWall = u.reviewerDurationMs + u.fixerDurationMs;
+  if (totalCost === 0 && totalWall === 0) return;
+  log.detail(
+    "review total",
+    `cost=$${totalCost.toFixed(4)} ` +
+      `(reviewer $${u.reviewerCostUsd.toFixed(4)} / fixer $${u.fixerCostUsd.toFixed(4)}) ` +
+      `wall=${humanDuration(totalWall)}`,
   );
 }
 

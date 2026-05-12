@@ -22,7 +22,7 @@ import { execa, type ResultPromise } from "execa";
 import type { Writable } from "node:stream";
 import { stripAnsi } from "./Logger.js";
 import { detectRateLimit } from "./RateLimit.js";
-import type { AgentResult } from "./types.js";
+import type { AgentResult, AgentUsage } from "./types.js";
 
 export interface AgentProcessOptions {
   /** Path or name of the binary. Default: 'claude'. */
@@ -30,9 +30,21 @@ export interface AgentProcessOptions {
   /** Model name passed via `--model`. */
   model: string;
   /**
-   * Args inserted before `--model`. Default mirrors `loop.sh:42`:
-   * `['--print', '--dangerously-skip-permissions']`. Override only for
-   * testing (e.g. to point at a fake-claude shim).
+   * Args inserted before `--model`. Default:
+   * `['--print', '--dangerously-skip-permissions', '--output-format',
+   *   'stream-json', '--verbose']`.
+   *
+   * `--output-format stream-json --verbose` makes claude emit one JSON
+   * event per line (assistant text, tool_use, tool_result, system init,
+   * rate_limit, and a final `result` event with full `usage`, cost,
+   * and api duration). The parser in `run()` consumes those to populate
+   * `AgentResult.usage / .costUsd / .text / .apiDurationMs / .numTurns`
+   * and renders each event to a single human-readable line on the
+   * `logStream` / `onLine` callback, so `tail -f` of the iteration log
+   * stays readable even though the wire format is JSON.
+   *
+   * Override only for testing (e.g. to point at a fake-claude shim that
+   * emits plain text — the parser falls back to text mode in that case).
    */
   extraArgs?: string[];
   /** Wall-clock cap. SIGTERM at this point, SIGKILL `killGraceMs` later. */
@@ -88,7 +100,13 @@ export class AgentProcess {
    */
   async run(prompt: string): Promise<AgentResult> {
     const command = this.opts.command ?? "claude";
-    const extraArgs = this.opts.extraArgs ?? ["--print", "--dangerously-skip-permissions"];
+    const extraArgs = this.opts.extraArgs ?? [
+      "--print",
+      "--dangerously-skip-permissions",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+    ];
     const args = [...extraArgs, "--model", this.opts.model];
 
     this.startedAt = Date.now();
@@ -115,12 +133,22 @@ export class AgentProcess {
       () => undefined,
     );
 
-    // Live tee/onLine — runs alongside execa's buffer. We only use these for
-    // realtime side-effects; the authoritative full strings come from
-    // result.stdout / result.stderr below.
+    // Stream-json event aggregator. Captures the final `result` event so we
+    // can fill `text` / `usage` / `costUsd` after the child exits. A pure
+    // sink — does NOT touch the live tee path.
+    const stream = new StreamJsonAggregator();
+
+    // Live tee/onLine — runs alongside execa's buffer. Each stdout line goes
+    // through the renderer: stream-json events come out as one human-readable
+    // line each ("[assistant] …", "[tool] Bash(git …)", "[done] $0.42 in=…")
+    // so `tail -f` of the iteration log stays readable. Plain-text lines
+    // (fake-claude in tests, or a future text-mode override) pass through.
     const stdoutSplitter = new LineSplitter((line) => {
-      this.opts.logStream?.write(stripAnsi(line) + "\n");
-      this.opts.onLine?.("stdout", line);
+      const rendered = stream.consume(line);
+      for (const out of rendered) {
+        this.opts.logStream?.write(stripAnsi(out) + "\n");
+        this.opts.onLine?.("stdout", out);
+      }
     });
     const stderrSplitter = new LineSplitter((line) => {
       this.opts.logStream?.write("[stderr] " + stripAnsi(line) + "\n");
@@ -179,12 +207,24 @@ export class AgentProcess {
       ? detectRateLimit(`${stdout}\n${stderr}`)
       : null;
 
+    // Pull usage + final assistant text out of the stream-json aggregator.
+    // Fallback when no stream-json `result` event was seen: stdout-as-text,
+    // null usage. That path is what fake-claude (tests) and any future
+    // text-mode override hit.
+    const final = stream.finalize();
+    const text = final.text ?? stdout;
+
     return {
       exitCode,
       signal,
       stdout,
       stderr,
+      text,
       durationMs,
+      apiDurationMs: final.apiDurationMs,
+      costUsd: final.costUsd,
+      numTurns: final.numTurns,
+      usage: final.usage,
       timedOut,
       killed,
       rateLimit,
@@ -234,6 +274,266 @@ class LineSplitter {
       this.onLine(line);
     }
   }
+}
+
+/**
+ * Stateful aggregator that consumes one stdout line at a time, renders it
+ * to human-readable trace lines, and pulls usage/cost/final-text out of the
+ * trailing `result` event.
+ *
+ * `consume(line)` returns the lines that should be written to the live tee
+ * (one event can produce 0..N rendered lines). `finalize()` returns the
+ * captured usage block once the stream is done — null when the input was
+ * not stream-json (so callers fall back to treating stdout as plain text).
+ *
+ * Design intent: keep this class pure-data — no I/O, no config. The shape of
+ * each event mirrors the documented Claude Code stream-json contract; new
+ * event types fall through to a generic `[event:<type>]` line so we never
+ * silently drop content the operator might want to see.
+ */
+class StreamJsonAggregator {
+  private sawStreamJson = false;
+  private finalText: string | null = null;
+  private usage: AgentUsage | null = null;
+  private costUsd: number | null = null;
+  private apiDurationMs: number | null = null;
+  private numTurns: number | null = null;
+
+  consume(rawLine: string): string[] {
+    const line = rawLine.trim();
+    if (line.length === 0) return [""];
+    if (!looksLikeJson(line)) {
+      // Plain-text mode (fake-claude, future text override). Pass through
+      // unchanged. We never flip `sawStreamJson` to true here, so finalize()
+      // will return text=null and callers fall back to stdout.
+      return [rawLine];
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      return [rawLine];
+    }
+    if (!isStreamJsonEvent(event)) return [rawLine];
+    this.sawStreamJson = true;
+    return this.render(event);
+  }
+
+  finalize(): {
+    text: string | null;
+    usage: AgentUsage | null;
+    costUsd: number | null;
+    apiDurationMs: number | null;
+    numTurns: number | null;
+  } {
+    if (!this.sawStreamJson) {
+      return { text: null, usage: null, costUsd: null, apiDurationMs: null, numTurns: null };
+    }
+    return {
+      text: this.finalText,
+      usage: this.usage,
+      costUsd: this.costUsd,
+      apiDurationMs: this.apiDurationMs,
+      numTurns: this.numTurns,
+    };
+  }
+
+  private render(event: StreamJsonEvent): string[] {
+    switch (event.type) {
+      case "system":
+        // The init event is a noisy dump of tool registry + session id.
+        // Render a one-liner so logs still show "claude started" without
+        // burying the rest of the trace.
+        if (event.subtype === "init") {
+          const model = typeof event.model === "string" ? event.model : "?";
+          return [`[system] init model=${model}`];
+        }
+        return [`[system] ${event.subtype ?? "event"}`];
+
+      case "rate_limit_event": {
+        const info = event.rate_limit_info;
+        if (info && typeof info === "object") {
+          const status = (info as { status?: string }).status ?? "?";
+          const resets = (info as { resetsAt?: number }).resetsAt;
+          const reset = typeof resets === "number" ? new Date(resets * 1000).toISOString() : "?";
+          return [`[rate-limit] status=${status} resets=${reset}`];
+        }
+        return ["[rate-limit] (info unavailable)"];
+      }
+
+      case "assistant":
+        return this.renderAssistant(event);
+
+      case "user":
+        return this.renderUserToolResults(event);
+
+      case "result": {
+        if (typeof event.result === "string") this.finalText = event.result;
+        if (typeof event.duration_api_ms === "number") this.apiDurationMs = event.duration_api_ms;
+        if (typeof event.total_cost_usd === "number") this.costUsd = event.total_cost_usd;
+        if (typeof event.num_turns === "number") this.numTurns = event.num_turns;
+        const u = event.usage;
+        if (u && typeof u === "object") {
+          this.usage = {
+            inputTokens: numField(u, "input_tokens"),
+            outputTokens: numField(u, "output_tokens"),
+            cacheReadInputTokens: numField(u, "cache_read_input_tokens"),
+            cacheCreationInputTokens: numField(u, "cache_creation_input_tokens"),
+          };
+        }
+        const lines = [
+          `[done] turns=${this.numTurns ?? "?"} ` +
+            `cost=${formatCost(this.costUsd)} ` +
+            `tokens=${formatUsageInline(this.usage)} ` +
+            `api=${formatMs(this.apiDurationMs)}`,
+        ];
+        if (event.is_error) lines.push(`[error] ${event.api_error_status ?? "unknown"}`);
+        return lines;
+      }
+
+      default:
+        return [`[event:${(event as { type?: string }).type ?? "?"}]`];
+    }
+  }
+
+  private renderAssistant(event: StreamJsonEvent): string[] {
+    const msg = (event as { message?: unknown }).message;
+    if (!msg || typeof msg !== "object") return [];
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    const out: string[] = [];
+    for (const c of content) {
+      if (!c || typeof c !== "object") continue;
+      const t = (c as { type?: string }).type;
+      if (t === "text") {
+        const text = (c as { text?: string }).text;
+        if (typeof text === "string" && text.length > 0) {
+          for (const ln of text.split("\n")) out.push(`[assistant] ${ln}`);
+        }
+      } else if (t === "thinking") {
+        const thinking = (c as { thinking?: string }).thinking;
+        if (typeof thinking === "string" && thinking.length > 0) {
+          // Thinking can be very long. Keep one compact preview so the log
+          // shows that reasoning happened without drowning out everything
+          // else. Operators who need the full text can read the raw model
+          // transcript elsewhere.
+          out.push(`[thinking] ${truncateOneLine(thinking, 200)}`);
+        }
+      } else if (t === "tool_use") {
+        const name = (c as { name?: string }).name ?? "?";
+        const input = (c as { input?: unknown }).input;
+        out.push(`[tool] ${name}(${previewInput(input)})`);
+      } else {
+        out.push(`[content:${t ?? "?"}]`);
+      }
+    }
+    return out;
+  }
+
+  private renderUserToolResults(event: StreamJsonEvent): string[] {
+    // claude emits a `user` event for each tool_result the harness feeds back
+    // into the conversation. We render just the type + a short preview so
+    // tool output doesn't dominate the log; the full content is available
+    // in the raw stdout buffer for deep debugging if needed.
+    const msg = (event as { message?: unknown }).message;
+    if (!msg || typeof msg !== "object") return [];
+    const content = (msg as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    const out: string[] = [];
+    for (const c of content) {
+      if (!c || typeof c !== "object") continue;
+      const t = (c as { type?: string }).type;
+      if (t === "tool_result") {
+        const isErr = Boolean((c as { is_error?: boolean }).is_error);
+        const body = (c as { content?: unknown }).content;
+        const preview = previewToolResult(body);
+        out.push(`[tool-result${isErr ? ":error" : ""}] ${preview}`);
+      }
+    }
+    return out;
+  }
+}
+
+interface StreamJsonEvent {
+  type: string;
+  subtype?: string;
+  model?: string;
+  rate_limit_info?: unknown;
+  result?: unknown;
+  duration_api_ms?: number;
+  total_cost_usd?: number;
+  num_turns?: number;
+  usage?: unknown;
+  is_error?: boolean;
+  api_error_status?: string | null;
+}
+
+function isStreamJsonEvent(v: unknown): v is StreamJsonEvent {
+  return typeof v === "object" && v !== null && typeof (v as { type?: unknown }).type === "string";
+}
+
+function looksLikeJson(line: string): boolean {
+  return line.startsWith("{") && line.endsWith("}");
+}
+
+function numField(o: object, key: string): number {
+  const v = (o as Record<string, unknown>)[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+function truncateOneLine(s: string, max: number): string {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? flat.slice(0, max - 1) + "…" : flat;
+}
+
+function previewInput(input: unknown): string {
+  if (input == null) return "";
+  if (typeof input === "string") return truncateOneLine(input, 120);
+  try {
+    return truncateOneLine(JSON.stringify(input), 120);
+  } catch {
+    return "<unserialisable>";
+  }
+}
+
+function previewToolResult(body: unknown): string {
+  if (body == null) return "";
+  if (typeof body === "string") return truncateOneLine(body, 120);
+  if (Array.isArray(body)) {
+    // Vision and structured tool_result bodies are arrays of `{type, text}`
+    // entries. Concatenate their `text` fields with single-space separators.
+    const text = body
+      .map((it) => (it && typeof it === "object" && typeof (it as { text?: string }).text === "string"
+        ? (it as { text: string }).text
+        : ""))
+      .filter((s) => s.length > 0)
+      .join(" ");
+    return truncateOneLine(text, 120);
+  }
+  try {
+    return truncateOneLine(JSON.stringify(body), 120);
+  } catch {
+    return "<unserialisable>";
+  }
+}
+
+function formatCost(n: number | null): string {
+  if (n == null) return "?";
+  return `$${n.toFixed(4)}`;
+}
+
+function formatMs(n: number | null): string {
+  if (n == null) return "?";
+  if (n < 1000) return `${n}ms`;
+  return `${(n / 1000).toFixed(1)}s`;
+}
+
+function formatUsageInline(u: AgentUsage | null): string {
+  if (!u) return "?";
+  return (
+    `in=${u.inputTokens} out=${u.outputTokens} ` +
+    `cache-r=${u.cacheReadInputTokens} cache-c=${u.cacheCreationInputTokens}`
+  );
 }
 
 function wrapEnoent(command: string): NodeJS.ErrnoException {

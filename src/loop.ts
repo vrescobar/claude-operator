@@ -49,7 +49,8 @@ import {
   markTaskBlocked,
   revertTaskToPending,
 } from "./TaskFile.js";
-import type { IterationOutcome, TaskRef, TestRunResult } from "./types.js";
+import { addUsage, emptyUsage, type AgentResult, type AgentUsage, type IterationOutcome, type TaskRef, type TestRunResult } from "./types.js";
+import { emptySubloopUsage, type SubloopUsage } from "./review/types.js";
 
 export interface LoopHooks {
   /** Skip claude / tests / commits and return the iteration plan instead. */
@@ -252,7 +253,11 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       log.detail("attempt", `#${attempt}`);
       log.detail("model", cfg.claudeModel);
       log.detail("log", relativePath(cfg.repoRoot, logFile));
-      log.detail("cmd", `${cfg.claudeBin} --print --dangerously-skip-permissions --model ${cfg.claudeModel}`);
+      log.detail(
+        "cmd",
+        `${cfg.claudeBin} --print --dangerously-skip-permissions ` +
+          `--output-format stream-json --verbose --model ${cfg.claudeModel}`,
+      );
 
       if (hooks.dryRun || cfg.dryRun) {
         log.info("dry-run: skipping spawn / tests / commit");
@@ -269,7 +274,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       // `runIteration` to grow the no-reset-time fallback.
       const nextRlHitNumber = rlStreak + 1;
 
-      const outcome = await runIteration({
+      const iterResult = await runIteration({
         cfg,
         task,
         attempt,
@@ -287,6 +292,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
         },
         rlHitNumber: nextRlHitNumber,
       });
+      const outcome = iterResult.outcome;
 
       // Maintain the streak: only "rate-limited" extends it, everything
       // else resets to zero (including a clean iteration).
@@ -295,14 +301,38 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
 
       runOutcomes.push(outcome);
       persist();
+      const iterDurationMs = Date.now() - iterStartedAt;
+      // Pre-compute roll-up totals so they're cheap to read straight from
+      // the JSONL (no client-side summation across reviewer/fixer/agent).
+      const totalUsage: AgentUsage = addUsage(
+        addUsage(iterResult.agent.usage, iterResult.subloop.reviewerUsage),
+        iterResult.subloop.fixerUsage,
+      );
+      const totalCostUsd =
+        iterResult.agent.costUsd +
+        iterResult.subloop.reviewerCostUsd +
+        iterResult.subloop.fixerCostUsd;
       appendMetric(cfg.metricsFile, {
         iteration: iter,
         taskId: task.id,
         attempt,
         outcome,
-        durationMs: Date.now() - iterStartedAt,
+        durationMs: iterDurationMs,
         finishedAt: new Date().toISOString(),
+        agent: iterResult.agent,
+        review: iterResult.subloop,
+        totalCostUsd,
+        totalUsage,
       });
+      // End-of-iteration human summary on the operator's terminal.
+      log.info(
+        `iter ${iter} done — outcome=${outcome} ` +
+          `wall=${humanDuration(iterDurationMs)} ` +
+          `cost=$${totalCostUsd.toFixed(4)} ` +
+          `(agent $${iterResult.agent.costUsd.toFixed(4)}, ` +
+          `review $${(iterResult.subloop.reviewerCostUsd + iterResult.subloop.fixerCostUsd).toFixed(4)}) ` +
+          `tokens=${formatUsageInline(totalUsage)}`,
+      );
 
       if (outcome === "stop-marker") {
         runResult = "complete-marker";
@@ -392,9 +422,51 @@ interface IterationCtx {
   rlHitNumber: number;
 }
 
-async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
+interface IterationResult {
+  outcome: IterationOutcome;
+  /** Token / cost / wall / api numbers from the main agent call. */
+  agent: AgentMetrics;
+  /** Sub-loop totals — zero-valued when the review sub-loop didn't run. */
+  subloop: SubloopUsage;
+}
+
+interface AgentMetrics {
+  usage: AgentUsage;
+  costUsd: number;
+  durationMs: number;
+  apiDurationMs: number;
+  numTurns: number | null;
+}
+
+function metricsFromAgent(r: AgentResult): AgentMetrics {
+  return {
+    usage: r.usage ?? emptyUsage(),
+    costUsd: r.costUsd ?? 0,
+    durationMs: r.durationMs,
+    apiDurationMs: r.apiDurationMs ?? 0,
+    numTurns: r.numTurns,
+  };
+}
+
+async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
   const { cfg, task, attempt, logFile, log, hooks } = ctx;
   const stream = createWriteStream(logFile, { flags: "a" });
+  // Default-zero so every return path below produces a well-formed
+  // IterationResult — even paths that never spawn the agent (rate-limit
+  // abort) or that bail before the sub-loop runs.
+  let agentMetrics: AgentMetrics = {
+    usage: emptyUsage(),
+    costUsd: 0,
+    durationMs: 0,
+    apiDurationMs: 0,
+    numTurns: null,
+  };
+  let subloop: SubloopUsage = emptySubloopUsage();
+  const mk = (outcome: IterationOutcome): IterationResult => ({
+    outcome,
+    agent: agentMetrics,
+    subloop,
+  });
   try {
     const promptText = buildPrompt(cfg, task, attempt);
 
@@ -417,12 +489,14 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
 
     const result = await agent.run(promptText);
     ctx.clearAgent();
+    agentMetrics = metricsFromAgent(result);
 
     log.stage(
       "agent.exit",
       `code=${result.exitCode ?? "null"} signal=${result.signal ?? "-"} ` +
         `timedOut=${result.timedOut} duration=${humanDuration(result.durationMs)}`,
     );
+    logAgentUsage(log, result);
 
     if (result.rateLimit) {
       ctx.state.counters.rateLimitHits++;
@@ -443,28 +517,28 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
         // SIGINT. Surface it as agent-failed so the iteration ends cleanly.
         const e = err as Error;
         log.warn(`rate-limit sleep aborted: ${e.message}`);
-        return "agent-failed";
+        return mk("agent-failed");
       }
-      return "rate-limited";
+      return mk("rate-limited");
     }
 
     if (result.timedOut) {
       log.warn(`claude hit ${humanDuration(cfg.claudeTimeoutMs)} timeout — retrying next iteration`);
-      return "agent-failed";
+      return mk("agent-failed");
     }
     if (result.exitCode !== 0) {
       log.warn(`claude exited ${result.exitCode} — retrying next iteration`);
-      return "agent-failed";
+      return mk("agent-failed");
     }
 
     if (hasTaskComplete(cfg.progressFile, cfg.stopMarker)) {
       log.info(`stop marker '${cfg.stopMarker}' written by agent — halting`);
-      return "stop-marker";
+      return mk("stop-marker");
     }
 
     if (!isTaskMarkedDone(cfg.tasksFile, task.id)) {
       log.warn(`task #${task.id} not marked [x] yet — retrying next iteration`);
-      return "task-not-marked";
+      return mk("task-not-marked");
     }
 
     log.stage("tests.run");
@@ -475,7 +549,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
       log.warn(`tests failed (${humanDuration(tests.durationMs)}) — reverting #${task.id} → [ ]`);
       revertTaskToPending(cfg.tasksFile, task.id);
       await dropDirtyTree(ctx, "tests-failed");
-      return "tests-failed";
+      return mk("tests-failed");
     }
     log.stage("tests.ok", `${tests.summary} (${humanDuration(tests.durationMs)})`);
 
@@ -490,10 +564,10 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
             `(no-change retry ${tries}/${cfg.noChangeRetryLimit}) — reverting and retrying`,
         );
         revertTaskToPending(cfg.tasksFile, task.id);
-        return "no-changes-retry";
+        return mk("no-changes-retry");
       }
       log.info(`task #${task.id} accepted as a no-op after ${tries} attempts`);
-      return "no-changes-accepted";
+      return mk("no-changes-accepted");
     }
     taskState.noChangeAttempts = 0;
 
@@ -508,7 +582,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
       log.warn(`commit failed (exit ${c.exitCode}) — reverting #${task.id} → [ ]`);
       revertTaskToPending(cfg.tasksFile, task.id);
       await dropDirtyTree(ctx, "commit-failed");
-      return "tests-failed";
+      return mk("tests-failed");
     }
     ctx.state.counters.committed++;
     log.done(`committed ${cfg.commitTaskPrefix}(${task.id}): ${task.title}`);
@@ -530,6 +604,9 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
         reviewerAgentFactory: hooks.reviewerAgentFactory,
         fixerAgentFactory: hooks.fixerAgentFactory,
       });
+      // Capture sub-loop usage onto the closure so `mk()` includes it in the
+      // IterationResult regardless of which return path fires below.
+      subloop = subloopOutcome.usage;
 
       if (subloopOutcome.kind === "diverged") {
         // The sub-loop gave up but we don't halt the main loop. Two recovery
@@ -553,7 +630,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
           log.info(
             `tests pass at HEAD — accepting task #${task.id} commit chain without review polish`,
           );
-          return "committed-review-skipped";
+          return mk("committed-review-skipped");
         }
 
         if (originalSha) {
@@ -610,10 +687,10 @@ async function runIteration(ctx: IterationCtx): Promise<IterationOutcome> {
           cfg.progressFile,
           `- task #${task.id} review sub-loop diverged: ${subloopOutcome.reason} — reset and queued for retry`,
         );
-        return "tests-failed";
+        return mk("tests-failed");
       }
     }
-    return "committed";
+    return mk("committed");
   } finally {
     stream.end();
     ctx.clearAgent();
@@ -648,8 +725,17 @@ interface MetricLine {
   taskId: string;
   attempt: number;
   outcome: string;
+  /** Wall-clock duration of the whole iteration (agent + tests + review). */
   durationMs: number;
   finishedAt: string;
+  /** Main iteration agent metrics (zero-valued when the agent never spawned). */
+  agent: AgentMetrics;
+  /** Reviewer + fixer aggregate metrics across every sub-loop round. */
+  review: SubloopUsage;
+  /** Pre-computed roll-up so dashboards can `jq '.totalCostUsd' metrics.jsonl`. */
+  totalCostUsd: number;
+  /** Pre-computed roll-up of every model call in this iteration. */
+  totalUsage: AgentUsage;
 }
 
 function appendMetric(metricsFile: string, line: MetricLine): void {
@@ -658,6 +744,30 @@ function appendMetric(metricsFile: string, line: MetricLine): void {
   } catch {
     // Metrics are best-effort — never fail the loop on a metric write.
   }
+}
+
+/**
+ * Inline usage line right after `agent.exit`. Skipped silently in plain-text
+ * mode (fake-claude in tests): no usage data → no line. Mirrors the format
+ * used inside the review sub-loop so operators see one consistent shape.
+ */
+function logAgentUsage(log: Logger, r: AgentResult): void {
+  if (!r.usage && r.costUsd == null) return;
+  const u = r.usage;
+  const wall = humanDuration(r.durationMs);
+  const api = r.apiDurationMs != null ? humanDuration(r.apiDurationMs) : "?";
+  const cost = r.costUsd != null ? `$${r.costUsd.toFixed(4)}` : "$?";
+  const tokens = u
+    ? `in=${u.inputTokens} out=${u.outputTokens} cache-r=${u.cacheReadInputTokens} cache-c=${u.cacheCreationInputTokens}`
+    : "n/a";
+  log.detail("agent usage", `${tokens} cost=${cost} wall=${wall} api=${api}`);
+}
+
+function formatUsageInline(u: AgentUsage): string {
+  return (
+    `in=${u.inputTokens} out=${u.outputTokens} ` +
+    `cache-r=${u.cacheReadInputTokens} cache-c=${u.cacheCreationInputTokens}`
+  );
 }
 
 interface FinalStatusCtx {

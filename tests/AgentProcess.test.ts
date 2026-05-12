@@ -135,6 +135,96 @@ describe("AgentProcess", () => {
     await expect(agent.run("")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  test("stream-json output: usage / costUsd / text / numTurns parsed from the final result event", async () => {
+    // Pre-canned stream-json transcript: system init → assistant text →
+    // assistant tool_use → user tool_result → result. The fake-claude shim
+    // copies FAKE_CLAUDE_OUT verbatim to stdout, so we can drive the parser
+    // end-to-end without inventing a separate fixture.
+    const events = [
+      JSON.stringify({ type: "system", subtype: "init", model: "claude-opus-4-7" }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "thinking out loud" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "tool_use", name: "Bash", input: { command: "ls" } }] },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: { content: [{ type: "tool_result", is_error: false, content: "file1 file2" }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "final answer",
+        duration_api_ms: 1234,
+        total_cost_usd: 0.0421,
+        num_turns: 3,
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 9000,
+          cache_creation_input_tokens: 0,
+        },
+      }),
+    ];
+    const logPath = tempLog();
+    const stream = createWriteStream(logPath);
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake-model",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: events.join("\n"), FAKE_CLAUDE_EXIT: "0" },
+      logStream: stream,
+    });
+    const result = await agent.run("");
+    await new Promise<void>((resolve) => stream.end(() => resolve()));
+
+    expect(result.exitCode).toBe(0);
+    expect(result.text).toBe("final answer");
+    expect(result.costUsd).toBe(0.0421);
+    expect(result.numTurns).toBe(3);
+    expect(result.apiDurationMs).toBe(1234);
+    expect(result.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadInputTokens: 9000,
+      cacheCreationInputTokens: 0,
+    });
+    // Log file holds the human-rendered trace, not the raw JSON envelope —
+    // operators tail -f this file.
+    const logged = readFileSync(logPath, "utf8");
+    expect(logged).toContain("[system] init model=claude-opus-4-7");
+    expect(logged).toContain("[assistant] thinking out loud");
+    expect(logged).toContain("[tool] Bash(");
+    expect(logged).toContain("[tool-result]");
+    expect(logged).toContain("[done] turns=3");
+    expect(logged).toContain("cost=$0.0421");
+  });
+
+  test("plain-text output falls back: text==stdout, usage=null", async () => {
+    // No JSON in stdout → the parser stays in text mode. Keeps the
+    // fake-claude shim (and any future text-mode override) working.
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake-model",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: "plain output\nsecond line", FAKE_CLAUDE_EXIT: "0" },
+    });
+    const result = await agent.run("");
+    expect(result.exitCode).toBe(0);
+    expect(result.text).toContain("plain output");
+    expect(result.text).toBe(result.stdout);
+    expect(result.usage).toBeNull();
+    expect(result.costUsd).toBeNull();
+    expect(result.apiDurationMs).toBeNull();
+    expect(result.numTurns).toBeNull();
+  });
+
   test("rate-limit text in output is detected", async () => {
     const agent = new AgentProcess({
       command: FAKE_CLAUDE,

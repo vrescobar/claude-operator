@@ -71,6 +71,7 @@ function setupSandbox(opts: { reviewMaxRounds: number; reviewEnabled?: boolean }
     logRetentionDays: 0,
     progressMaxBytes: 1024 * 1024,
     progressTailKeepBytes: 8 * 1024,
+    autoArchiveClosedPhases: false,
     reviewEnabled: opts.reviewEnabled ?? true,
     reviewerBin: FAKE_REVIEWER,
     reviewerModel: "fake-opus",

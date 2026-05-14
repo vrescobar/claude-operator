@@ -45,6 +45,47 @@ Or add a script to your consumer `package.json`:
 
 CLI flag > env var > `.ralphloop/config.yaml` > built-in default.
 
+## Auto-archive of closed phases
+
+When `tasks.md` is organised by `## Phase N — title` headings, the loop moves
+each fully-completed phase (every task `[x]`) out to
+`<archiveDir>/tasks-phases-archived.md` at the start of every `run`. The last
+`## Phase` heading is always preserved so the operator sees the just-finished
+phase until they write the next one.
+
+Run manually with:
+
+```sh
+bun ./ralphloop/bin/ralphloop.ts archive phases
+```
+
+Disable globally:
+
+```yaml
+# .ralphloop/config.yaml
+autoArchiveClosedPhases: false
+```
+
+Or via env: `RALPH_AUTO_ARCHIVE_CLOSED_PHASES=0`.
+
+Cuts ~40 KB of `[x]` history off the per-iteration context once you have a few
+dozen completed phases.
+
+## Timezone
+
+All operator-facing timestamps (iteration headers, rate-limit banners,
+progress.md rotation stubs, archive listings, blocked-task notes) render in
+the host's local timezone with the offset shown. Example:
+
+```
+━━━ ralph iteration 8/10 ━━━  14:32:01
+  ⏸ rate-limited until 2026-05-14T15:00:00.000Z (2026-05-14 17:00:00 GMT+2)
+```
+
+Canonical state files (`state.json`, `metrics.jsonl`, git stash refs,
+per-iteration log filenames) keep ISO-8601 UTC so they sort and compare
+deterministically across timezones.
+
 ## Updating the submodule
 
 ```sh

@@ -120,6 +120,14 @@ export interface Config {
    */
   progressMaxBytes: number;
   progressTailKeepBytes: number;
+  /**
+   * When true, at the start of each `run` invocation the loop scans
+   * `tasks.md` for `## Phase N` sections whose tasks are all `[x]` and
+   * moves them to `<archiveDir>/tasks-phases-archived.md`. The most recent
+   * `## Phase` heading is always preserved so the operator sees the
+   * just-finished phase until they write the next one. Default true.
+   */
+  autoArchiveClosedPhases: boolean;
 
   /** Run the reviewer→fixer sub-loop after each successful task commit. */
   reviewEnabled: boolean;
@@ -280,6 +288,11 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     logRetentionDays: intEnv("RALPH_LOG_RETENTION_DAYS", 14, env),
     progressMaxBytes: intEnv("RALPH_PROGRESS_MAX_BYTES", 64 * 1024, env),
     progressTailKeepBytes: intEnv("RALPH_PROGRESS_TAIL_KEEP_BYTES", 8 * 1024, env),
+    autoArchiveClosedPhases: boolEnv(
+      "RALPH_AUTO_ARCHIVE_CLOSED_PHASES",
+      cfgFile.autoArchiveClosedPhases ?? true,
+      env,
+    ),
 
     reviewEnabled:
       overrides.reviewEnabled ??

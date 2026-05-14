@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { atomicWriteFileSync } from "./atomic.js";
+import { formatLocal, localFileStamp } from "./time.js";
 
 /**
  * Returns true iff the file contains a line whose only content (modulo
@@ -59,18 +60,16 @@ export function rotateProgressIfTooLarge(
   }
   if (size <= maxBytes) return null;
 
-  const ts = now()
-    .toISOString()
-    .replace(/[:.]/g, "-")
-    .replace("T", "-")
-    .replace("Z", "");
+  // Local-time stamp for the archive filename so operators recognise it at
+  // a glance; matches the convention used by per-iteration log files.
+  const ts = localFileStamp(now());
   const archive = archiveDir
     ? resolve(archiveDir, `progress-${ts}.md`)
     : resolve(dirname(path), `progress.archive-${ts}.md`);
   const original = readFileSync(path, "utf8");
   const tail = tailKeepBytes > 0 ? original.slice(-tailKeepBytes) : "";
   const stub =
-    `# progress (rotated ${now().toISOString()})\n\n` +
+    `# progress (rotated ${formatLocal(now())})\n\n` +
     `> Earlier entries archived to \`${archive.split("/").pop()}\` ` +
     `(${size} bytes). Showing tail only.\n\n` +
     tail;

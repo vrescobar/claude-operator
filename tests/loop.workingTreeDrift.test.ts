@@ -69,6 +69,7 @@ function setup(failResetMode: "stash" | "reset" | "leave"): { cfg: Config; root:
     logRetentionDays: 0,
     progressMaxBytes: 1024 * 1024,
     progressTailKeepBytes: 8 * 1024,
+    autoArchiveClosedPhases: false,
     reviewEnabled: false,
     reviewerBin: FAKE_CLAUDE,
     reviewerModel: "fake",

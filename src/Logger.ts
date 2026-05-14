@@ -5,7 +5,13 @@
  * the operator's terminal. The per-iteration log file (in `ralph/logs/`)
  * captures the full agent stream regardless of verbosity, so debugging a
  * hung process is always `tail -f` away.
+ *
+ * All operator-facing timestamps render in the host's local timezone via
+ * `src/time.ts` helpers. Canonical state (state.json, metrics.jsonl, git
+ * refs) stays ISO-8601 UTC and is never printed raw to the terminal.
  */
+
+import { nowLocalHms, formatLocal as formatLocalTs } from "./time.js";
 
 const ANSI = {
   reset: "\x1b[0m",
@@ -33,8 +39,7 @@ export class Logger {
   constructor(private readonly opts: LoggerOptions) {}
 
   private now(): string {
-    const d = new Date();
-    return d.toISOString().slice(11, 19);
+    return nowLocalHms();
   }
 
   private write(line: string): void {
@@ -128,10 +133,11 @@ export function stripAnsi(s: string): string {
 }
 
 /**
- * Render a Date both as ISO (canonical, sortable) and as local-time so the
- * operator doesn't have to do the timezone math at 02:13 in the morning.
+ * Render a Date both as ISO (canonical, sortable) and as local-time with the
+ * offset, so the operator doesn't have to do the timezone math at 02:13 in
+ * the morning. Re-exported here for backwards compatibility — new callers
+ * should import from `./time.js` directly.
  */
 export function formatIsoWithLocal(d: Date): string {
-  const local = d.toLocaleString(undefined, { hour12: false });
-  return `${d.toISOString()} (${local})`;
+  return `${d.toISOString()} (${formatLocalTs(d)})`;
 }

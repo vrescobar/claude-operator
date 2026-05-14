@@ -35,6 +35,7 @@ import {
 } from "./GitOps.js";
 import { humanDuration, Logger } from "./Logger.js";
 import { Lockfile, LockfileBusyError } from "./Lockfile.js";
+import { archiveClosedPhases } from "./PhaseArchive.js";
 import { hasTaskComplete, rotateProgressIfTooLarge } from "./ProgressFile.js";
 import { loadIterationPrompt } from "./promptTemplate.js";
 import { computeSleepUntil, sleepUntil } from "./RateLimit.js";
@@ -49,6 +50,7 @@ import {
   markTaskBlocked,
   revertTaskToPending,
 } from "./TaskFile.js";
+import { formatLocal as formatLocalTs } from "./time.js";
 import { addUsage, emptyUsage, type AgentResult, type AgentUsage, type IterationOutcome, type TaskRef, type TestRunResult } from "./types.js";
 import { emptySubloopUsage, type SubloopUsage } from "./review/types.js";
 
@@ -114,6 +116,21 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
   );
   if (archived) {
     process.stdout.write(`ralph: progress.md rotated → ${archived}\n`);
+  }
+  if (cfg.autoArchiveClosedPhases) {
+    const phaseArchive = archiveClosedPhases({
+      tasksFile: cfg.tasksFile,
+      archiveDir: cfg.archiveDir,
+    });
+    if (phaseArchive.archivedCount > 0) {
+      process.stdout.write(
+        `ralph: archived ${phaseArchive.archivedCount} closed phase(s) → ` +
+          `${phaseArchive.archivePath}\n`,
+      );
+      for (const h of phaseArchive.archivedHeadings) {
+        process.stdout.write(`         · ${h}\n`);
+      }
+    }
   }
 
   await ensureRepo({ cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs });
@@ -231,9 +248,12 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       const taskState = getTaskState(state, task.id);
 
       if (taskState.attempts >= cfg.taskAttemptLimit) {
+        const lastDisplay = taskState.lastAttemptAt
+          ? formatLocalTs(new Date(taskState.lastAttemptAt))
+          : "unknown";
         const reason =
           `attempt limit ${cfg.taskAttemptLimit} reached — moving on. ` +
-          `Latest attempt at ${taskState.lastAttemptAt ?? "unknown"}.`;
+          `Latest attempt at ${lastDisplay}.`;
         log.error(`task #${task.id} blocked — ${reason}`);
         markTaskBlocked(cfg.tasksFile, task.id);
         appendProgressNote(
@@ -894,7 +914,7 @@ function appendProgressNote(progressFile: string, note: string): void {
   try {
     const existing = existsSync(progressFile) ? readFileSync(progressFile, "utf8") : "";
     const sep = existing.length === 0 || existing.endsWith("\n") ? "" : "\n";
-    const stamped = `${sep}${note}  _(ralph @ ${new Date().toISOString()})_\n`;
+    const stamped = `${sep}${note}  _(ralph @ ${formatLocalTs(new Date())})_\n`;
     appendFileSync(progressFile, stamped);
   } catch {
     // Swallow: progress.md is informational, never load-bearing for control flow.

@@ -78,6 +78,7 @@ function setup(opts: SandboxOptions): { cfg: Config; root: string } {
     logRetentionDays: 0,
     progressMaxBytes: 1024 * 1024,
     progressTailKeepBytes: 8 * 1024,
+    autoArchiveClosedPhases: false,
     reviewEnabled: true,
     reviewerBin: FAKE_REVIEWER,
     reviewerModel: "fake-opus",

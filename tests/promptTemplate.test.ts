@@ -45,6 +45,7 @@ function stubConfig(overrides: Partial<Config> = {}): Config {
     logRetentionDays: 0,
     progressMaxBytes: 1024,
     progressTailKeepBytes: 0,
+    autoArchiveClosedPhases: false,
     reviewEnabled: false,
     reviewerBin: "claude",
     reviewerModel: "x",

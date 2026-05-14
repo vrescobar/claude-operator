@@ -17,7 +17,9 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadConfig, type ConfigOverrides } from "../src/Config.js";
 import { runLoop } from "../src/loop.js";
+import { archiveClosedPhases } from "../src/PhaseArchive.js";
 import { runInit } from "../src/scaffolder.js";
+import { formatLocal } from "../src/time.js";
 import { resolveWorkspace, type WorkspaceCliFlags } from "../src/workspace.js";
 
 const HELP = `Usage: ralphloop <subcommand> [options]
@@ -27,6 +29,8 @@ Subcommands:
   init                      scaffold .ralphloop/ in cwd
   doctor                    print resolved Config + validate workspace
   archive ls                list rotated progress archives
+  archive phases            move closed phases out of tasks.md (also runs
+                            automatically before each \`run\`)
 
 Common options (apply to every subcommand):
   --cwd <dir>               working directory (default: process.cwd())
@@ -60,7 +64,7 @@ Config precedence: CLI flag > env var > .ralphloop/config.yaml > built-in defaul
 
 interface ParsedArgs {
   subcommand: "run" | "init" | "doctor" | "archive" | "help";
-  archiveAction?: "ls";
+  archiveAction?: "ls" | "phases";
   workspaceFlags: WorkspaceCliFlags;
   overrides: ConfigOverrides;
   createGoalStub: boolean;
@@ -86,6 +90,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       i = 1;
       if (argv[1] === "ls") {
         out.archiveAction = "ls";
+        i = 2;
+      } else if (argv[1] === "phases") {
+        out.archiveAction = "phases";
         i = 2;
       }
     } else if (sub === "help") {
@@ -207,13 +214,30 @@ async function main(): Promise<void> {
       break;
     }
     case "archive": {
-      if (args.archiveAction !== "ls") {
-        process.stderr.write("ralphloop: archive subcommand requires 'ls'\n");
+      const cfg = loadConfig({ workspace, overrides: args.overrides });
+      if (args.archiveAction === "ls") {
+        listArchives(cfg.archiveDir);
+        process.exit(0);
+      } else if (args.archiveAction === "phases") {
+        const result = archiveClosedPhases({
+          tasksFile: cfg.tasksFile,
+          archiveDir: cfg.archiveDir,
+        });
+        if (result.archivedCount === 0) {
+          process.stdout.write("ralphloop: no closed phases to archive.\n");
+        } else {
+          process.stdout.write(
+            `ralphloop: archived ${result.archivedCount} phase(s) → ${result.archivePath}\n`,
+          );
+          for (const h of result.archivedHeadings) {
+            process.stdout.write(`  · ${h}\n`);
+          }
+        }
+        process.exit(0);
+      } else {
+        process.stderr.write("ralphloop: archive subcommand requires 'ls' or 'phases'\n");
         process.exit(2);
       }
-      const cfg = loadConfig({ workspace, overrides: args.overrides });
-      listArchives(cfg.archiveDir);
-      process.exit(0);
       break;
     }
   }
@@ -274,7 +298,7 @@ function listArchives(archiveDir: string): void {
   for (const f of files) {
     const full = resolve(archiveDir, f);
     const st = statSync(full);
-    process.stdout.write(`  ${f}  ${st.size}B  ${st.mtime.toISOString()}\n`);
+    process.stdout.write(`  ${f}  ${st.size}B  ${formatLocal(st.mtime)}\n`);
   }
 }
 

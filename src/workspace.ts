@@ -52,6 +52,8 @@ export interface RalphloopConfigFile {
     fixerModel?: string;
     maxRounds?: number;
   };
+  /** Auto-archive fully-closed `## Phase N` sections from tasks.md. Default true. */
+  autoArchiveClosedPhases?: boolean;
 }
 
 export interface WorkspaceResolution {

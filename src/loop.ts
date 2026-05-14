@@ -269,7 +269,9 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       const attempt = taskState.attempts + 1;
       const logFile = openIterationLogFilePath(cfg.logsDir, task.id, attempt);
 
-      log.detail("task", `#${task.id} — ${task.title}`);
+      const remainingOpen = safeCountOpenTasks(cfg.tasksFile);
+      const remainingNote = remainingOpen >= 1 ? `  (${remainingOpen} pending)` : "";
+      log.detail("task", `#${task.id} — ${task.title}${remainingNote}`);
       log.detail("attempt", `#${attempt}`);
       log.detail("model", cfg.claudeModel);
       log.detail("log", relativePath(cfg.repoRoot, logFile));

@@ -80,6 +80,20 @@ export interface AgentResult {
   killed: boolean;
   /** Populated when rate-limit text was detected in stdout/stderr. */
   rateLimit: RateLimitInfo | null;
+  /**
+   * Where `usage` came from:
+   *  - `"stream-json"` — claude's own `result` event (the `claude` backend).
+   *  - `"session-jsonl"` — recovered from the persisted session transcript
+   *    because the backend (`claude-p`) reports placeholder usage.
+   *  - `null` — no usage available (plain-text / fake-claude).
+   */
+  usageSource: "stream-json" | "session-jsonl" | null;
+  /**
+   * True when `costUsd` is an estimate computed from token counts × a local
+   * price table (`Pricing.ts`) rather than a figure claude reported itself.
+   * Always true under the `claude-p` backend when usage was recovered.
+   */
+  costEstimated: boolean;
 }
 
 /** Zero-initialised usage block — useful when summing across rounds. */

@@ -53,6 +53,8 @@ function setup(): { cfg: Config; root: string } {
     maxIterations: 10,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
+    agentBackend: "claude",
+    claudePBin: "claude-p",
     claudeModel: "fake",
     claudeTimeoutMs: 5000,
     testTimeoutMs: 5000,

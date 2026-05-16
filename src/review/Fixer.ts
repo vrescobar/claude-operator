@@ -11,6 +11,7 @@ import { dirname, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { AgentProcess } from "../AgentProcess.js";
+import { buildInvocation } from "../AgentBackend.js";
 import type { Config } from "../Config.js";
 import type { Logger } from "../Logger.js";
 import type { AgentResult, TaskRef } from "../types.js";
@@ -52,16 +53,27 @@ export async function runFixer(opts: RunFixerOptions): Promise<FixerOutput> {
 
     const factory =
       opts.agentFactory ??
-      ((logStream) =>
-        new AgentProcess({
-          command: cfg.fixerBin,
+      ((logStream) => {
+        const inv = buildInvocation(cfg.agentBackend, {
+          roleBin: cfg.fixerBin,
+          claudePBin: cfg.claudePBin,
+          repoRoot: cfg.repoRoot,
+          timeoutMs: cfg.fixerTimeoutMs,
+        });
+        return new AgentProcess({
+          command: inv.command,
+          extraArgs: inv.extraArgs,
+          promptViaStdin: inv.promptViaStdin,
+          sessionId: inv.sessionId,
+          recoverUsage: cfg.agentBackend === "claude-p",
           model: cfg.fixerModel,
           timeoutMs: cfg.fixerTimeoutMs,
           cwd: cfg.repoRoot,
           logStream,
           onLine: log.streamAgentLine,
           maxBufferBytes: cfg.agentMaxBufferBytes,
-        }));
+        });
+      });
     const agent = factory(stream);
     registerAgent(agent);
     try {

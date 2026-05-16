@@ -53,6 +53,8 @@ function setup(failResetMode: "stash" | "reset" | "leave"): { cfg: Config; root:
     maxIterations: 1,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
+    agentBackend: "claude",
+    claudePBin: "claude-p",
     claudeModel: "fake",
     claudeTimeoutMs: 5000,
     testTimeoutMs: 5000,

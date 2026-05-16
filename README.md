@@ -41,6 +41,50 @@ Or add a script to your consumer `package.json`:
 "scripts": { "ralph": "bun ./ralphloop/bin/ralphloop.ts run" }
 ```
 
+## Agent backends
+
+Each agent invocation (main agent, reviewer, fixer) is driven by one of two
+backends, selected globally:
+
+| Backend    | How it bills            | Select with |
+|------------|-------------------------|-------------|
+| `claude`   | Official Claude Code CLI — API key | default |
+| `claude-p` | [`claude-p`](https://github.com/Equality-Machine/claude-p) wrapper — runs on the Claude **subscription** login | `--claude-p` |
+
+```sh
+bun ./ralphloop/bin/ralphloop.ts run --claude-p          # or --backend claude-p
+```
+
+Also settable via `agentBackend:` in `config.yaml` or `RALPH_AGENT_BACKEND`.
+
+**Installing `claude-p`** — it is a Python tool, so `bun` cannot install it.
+Install it pinned to the exact audited version:
+
+```sh
+uv tool install 'claude-p==0.1.4'        # or: pip install 'claude-p==0.1.4'
+```
+
+`ralphloop doctor` confirms `claude-p` is installed and runnable, and shows the
+pinned target version (`0.1.4`) — verify it with `uv tool list` or
+`pip show claude-p` (`claude-p --version` forwards to `claude` and cannot
+report the wrapper's own version).
+
+**First-run folder trust** — `claude-p` drives the interactive TUI, which shows
+a one-time "trust this folder?" dialog for a directory Claude Code has not seen
+before. Open your repo once in `claude` (interactively) and accept the prompt
+before running ralphloop with `--claude-p`, otherwise the run fails with
+`workspace_trust_blocked`.
+
+**Cost reporting under `claude-p`** — the interactive TUI does not expose
+billing data, so `claude-p` reports placeholder usage. ralphloop works around
+this: it forces a known `--session-id`, then after each run reads the real
+per-turn token counts back from the Claude Code session transcript
+(`~/.claude/projects/**/<id>.jsonl`) and **estimates** the dollar cost from a
+local price table (`src/Pricing.ts`). Cost figures under `claude-p` are
+therefore estimates — shown with a `≈$` / `~$` prefix — and the price table
+must be kept current. There is no quota budget: when Claude rate-limits, the
+loop simply waits out the reset window as it always has.
+
 ## Config precedence
 
 CLI flag > env var > `.ralphloop/config.yaml` > built-in default.

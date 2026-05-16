@@ -81,6 +81,8 @@ function setupSandbox(maxIterations: number): Sandbox {
     maxIterations,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
+    agentBackend: "claude",
+    claudePBin: "claude-p",
     claudeModel: "fake",
     claudeTimeoutMs: 5000,
     testTimeoutMs: 5000,

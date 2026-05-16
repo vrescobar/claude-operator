@@ -21,7 +21,9 @@
 import { execa, type ResultPromise } from "execa";
 import type { Writable } from "node:stream";
 import { stripAnsi } from "./Logger.js";
+import { estimateCostUsd } from "./Pricing.js";
 import { detectRateLimit } from "./RateLimit.js";
+import { readSessionUsage } from "./SessionUsage.js";
 import type { AgentResult, AgentUsage } from "./types.js";
 
 export interface AgentProcessOptions {
@@ -47,6 +49,24 @@ export interface AgentProcessOptions {
    * emits plain text — the parser falls back to text mode in that case).
    */
   extraArgs?: string[];
+  /**
+   * When true (default) the prompt is piped to the child's stdin. When false
+   * it is appended as the last positional argument instead — needed for
+   * backends that take the prompt as an argv rather than reading stdin.
+   */
+  promptViaStdin?: boolean;
+  /**
+   * Session id this run was launched with (the `claude-p` backend forces one
+   * via `--session-id`). When set together with `recoverUsage`, the persisted
+   * transcript is read back after exit to recover real token usage.
+   */
+  sessionId?: string | null;
+  /**
+   * When true, and the stream-json `result` event carried no real usage
+   * (zero / absent — as with `claude-p`), recover token counts from the
+   * session transcript and estimate cost from `model`.
+   */
+  recoverUsage?: boolean;
   /** Wall-clock cap. SIGTERM at this point, SIGKILL `killGraceMs` later. */
   timeoutMs: number;
   /** Grace period between SIGTERM and SIGKILL. Default 30 s — matches `--kill-after=30s` in bash. */
@@ -107,7 +127,12 @@ export class AgentProcess {
       "stream-json",
       "--verbose",
     ];
-    const args = [...extraArgs, "--model", this.opts.model];
+    // Default: prompt on stdin. When `promptViaStdin` is false the prompt is
+    // the last positional argv instead (some backends don't read stdin).
+    const promptViaStdin = this.opts.promptViaStdin ?? true;
+    const args = promptViaStdin
+      ? [...extraArgs, "--model", this.opts.model]
+      : [...extraArgs, "--model", this.opts.model, prompt];
 
     this.startedAt = Date.now();
     this.explicitlyKilled = false;
@@ -118,7 +143,7 @@ export class AgentProcess {
       timeout: this.opts.timeoutMs,
       killSignal: "SIGTERM",
       forceKillAfterDelay: this.opts.killGraceMs ?? 30_000,
-      input: prompt,
+      input: promptViaStdin ? prompt : undefined,
       reject: false,
       // buffer: true (the default) — execa accumulates stdout/stderr into
       // strings on the result. We separately attach 'data' listeners for
@@ -214,6 +239,33 @@ export class AgentProcess {
     const final = stream.finalize();
     const text = final.text ?? stdout;
 
+    let usage = final.usage;
+    let costUsd = final.costUsd;
+    let usageSource: AgentResult["usageSource"] = usage ? "stream-json" : null;
+    let costEstimated = false;
+
+    // The `claude-p` backend always emits placeholder usage in its stream
+    // (`output_tokens: 1`, everything else null), so when recovery is enabled
+    // we unconditionally prefer the real per-turn counts read back from the
+    // persisted session transcript. `isZeroUsage` only guards against an
+    // empty / not-yet-flushed transcript.
+    if (this.opts.recoverUsage && this.opts.sessionId) {
+      const recovered = readSessionUsage(this.opts.sessionId);
+      if (recovered && !isZeroUsage(recovered)) {
+        usage = recovered;
+        usageSource = "session-jsonl";
+      }
+    }
+
+    // No real cost from the backend → estimate from tokens × the price table.
+    if (costUsd == null && usage) {
+      const est = estimateCostUsd(this.opts.model, usage);
+      if (est != null) {
+        costUsd = est;
+        costEstimated = true;
+      }
+    }
+
     return {
       exitCode,
       signal,
@@ -222,12 +274,14 @@ export class AgentProcess {
       text,
       durationMs,
       apiDurationMs: final.apiDurationMs,
-      costUsd: final.costUsd,
+      costUsd,
       numTurns: final.numTurns,
-      usage: final.usage,
+      usage,
       timedOut,
       killed,
       rateLimit,
+      usageSource,
+      costEstimated,
     };
   }
 
@@ -474,6 +528,15 @@ function isStreamJsonEvent(v: unknown): v is StreamJsonEvent {
 
 function looksLikeJson(line: string): boolean {
   return line.startsWith("{") && line.endsWith("}");
+}
+
+function isZeroUsage(u: AgentUsage): boolean {
+  return (
+    u.inputTokens === 0 &&
+    u.outputTokens === 0 &&
+    u.cacheReadInputTokens === 0 &&
+    u.cacheCreationInputTokens === 0
+  );
 }
 
 function numField(o: object, key: string): number {

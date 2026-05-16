@@ -55,6 +55,8 @@ function setupSandbox(): { cfg: Config; root: string } {
     maxIterations: 2,
     stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
+    agentBackend: "claude",
+    claudePBin: "claude-p",
     claudeModel: "fake-model",
     claudeTimeoutMs: 5000,
     testTimeoutMs: 5000,

@@ -11,6 +11,7 @@
  */
 
 import { resolve } from "node:path";
+import { resolveBackend, type AgentBackend } from "./AgentBackend.js";
 import type { RalphloopConfigFile, WorkspaceResolution } from "./workspace.js";
 import { resolveWorkspace } from "./workspace.js";
 
@@ -46,8 +47,17 @@ export interface Config {
   commitTaskPrefix: string;
   /** Commit-message prefix for review-round commits (default "review"). */
   commitReviewPrefix: string;
+  /**
+   * Which CLI drives every agent invocation:
+   *  - `"claude"`   — the official Claude Code CLI (default; API-key billing).
+   *  - `"claude-p"` — the `claude-p` subscription wrapper.
+   * Applies globally (main agent + reviewer + fixer). See `AgentBackend.ts`.
+   */
+  agentBackend: AgentBackend;
   /** Path or name of the claude binary (default "claude"). */
   claudeBin: string;
+  /** Path or name of the `claude-p` binary, used when agentBackend is "claude-p". */
+  claudePBin: string;
   /** Model passed to `claude -p --model …`. */
   claudeModel: string;
   /** Wall-clock cap per agent invocation (ms). */
@@ -191,6 +201,8 @@ function parseFailResetMode(raw: string | undefined): "stash" | "reset" | "leave
 export interface ConfigOverrides {
   verbose?: boolean;
   dryRun?: boolean;
+  /** Override the agent backend at the CLI level (`--backend` / `--claude-p`). */
+  agentBackend?: AgentBackend;
   maxIterations?: number;
   reviewEnabled?: boolean;
   reviewMaxRounds?: number;
@@ -247,6 +259,10 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
   );
 
   const claudeBin = env["RALPH_CLAUDE_BIN"] || cfgFile.claude?.bin || "claude";
+  const agentBackend = resolveBackend(
+    overrides.agentBackend ?? env["RALPH_AGENT_BACKEND"] ?? cfgFile.agentBackend,
+  );
+  const claudePBin = env["RALPH_CLAUDE_P_BIN"] || cfgFile.claude?.pBin || "claude-p";
 
   const maxIterations =
     overrides.maxIterations ??
@@ -270,7 +286,9 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     commitTaskPrefix: env["RALPH_COMMIT_TASK_PREFIX"] || cfgFile.commit?.taskPrefix || "task",
     commitReviewPrefix:
       env["RALPH_COMMIT_REVIEW_PREFIX"] || cfgFile.commit?.reviewPrefix || "review",
+    agentBackend,
     claudeBin,
+    claudePBin,
     claudeModel: env["RALPH_CLAUDE_MODEL"] || cfgFile.claude?.model || "claude-sonnet-4-6",
     claudeTimeoutMs:
       intEnv("RALPH_CLAUDE_TIMEOUT_S", cfgFile.claude?.timeoutS ?? 1800, env) * 1000,

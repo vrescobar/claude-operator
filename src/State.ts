@@ -16,6 +16,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { atomicWriteFileSync } from "./atomic.js";
+import { emptyUsage, type AgentUsage } from "./types.js";
 
 export interface TaskState {
   /** Total spawn attempts across all runs (used for the attempt-limit guard). */
@@ -42,6 +43,13 @@ export interface LoopState {
   version: 1;
   tasks: Record<string, TaskState>;
   counters: AggregateCounters;
+  /**
+   * Lifetime cost across all runs (USD). Real figures under the `claude`
+   * backend; token-derived estimates under `claude-p`.
+   */
+  totalCostUsd: number;
+  /** Lifetime token usage across all runs. */
+  totalUsage: AgentUsage;
 }
 
 const EMPTY_COUNTERS: AggregateCounters = {
@@ -54,7 +62,28 @@ const EMPTY_COUNTERS: AggregateCounters = {
 };
 
 export function freshState(): LoopState {
-  return { version: 1, tasks: {}, counters: { ...EMPTY_COUNTERS } };
+  return {
+    version: 1,
+    tasks: {},
+    counters: { ...EMPTY_COUNTERS },
+    totalCostUsd: 0,
+    totalUsage: emptyUsage(),
+  };
+}
+
+/** Coerce an untrusted value into a well-formed AgentUsage (missing → 0). */
+function sanitizeUsage(v: unknown): AgentUsage {
+  const u = emptyUsage();
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    const n = (k: string): number =>
+      typeof o[k] === "number" && Number.isFinite(o[k] as number) ? (o[k] as number) : 0;
+    u.inputTokens = n("inputTokens");
+    u.outputTokens = n("outputTokens");
+    u.cacheReadInputTokens = n("cacheReadInputTokens");
+    u.cacheCreationInputTokens = n("cacheCreationInputTokens");
+  }
+  return u;
 }
 
 export function loadState(path: string): LoopState {
@@ -72,10 +101,16 @@ export function loadState(path: string): LoopState {
     return freshState();
   }
   if (!isLoopStateLike(parsed)) return freshState();
+  const extra = parsed as { totalCostUsd?: unknown; totalUsage?: unknown };
   return {
     version: 1,
     tasks: { ...parsed.tasks },
     counters: { ...EMPTY_COUNTERS, ...parsed.counters },
+    totalCostUsd:
+      typeof extra.totalCostUsd === "number" && Number.isFinite(extra.totalCostUsd)
+        ? extra.totalCostUsd
+        : 0,
+    totalUsage: sanitizeUsage(extra.totalUsage),
   };
 }
 

@@ -29,6 +29,8 @@ function stubConfig(overrides: Partial<Config> = {}): Config {
     commitTaskPrefix: "task",
     commitReviewPrefix: "review",
     claudeBin: "claude",
+    agentBackend: "claude",
+    claudePBin: "claude-p",
     claudeModel: "x",
     claudeTimeoutMs: 1,
     testTimeoutMs: 1,

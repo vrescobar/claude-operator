@@ -13,8 +13,10 @@
  * 2 = pre-flight / argument error).
  */
 
+import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { CLAUDE_P_PINNED_VERSION, resolveBackend } from "../src/AgentBackend.js";
 import { loadConfig, type ConfigOverrides } from "../src/Config.js";
 import { runLoop } from "../src/loop.js";
 import { archiveClosedPhases } from "../src/PhaseArchive.js";
@@ -46,12 +48,16 @@ Common options (apply to every subcommand):
   --dry-run                 print the next task and exit (no spawn / commit)
   --no-review               disable the reviewer→fixer sub-loop
   --review-max-rounds <N>   override RALPH_REVIEW_MAX_ROUNDS (default 5)
+  --backend <name>          agent backend: claude (default) or claude-p
+  --claude-p                shorthand for --backend claude-p
 
 \`init\` options:
   --create-goal-stub        create a stub GOAL.md at <repoRoot> if missing
 
 Selected environment variables (full list: README.md):
   RALPH_CLAUDE_BIN          path to claude CLI (default 'claude')
+  RALPH_CLAUDE_P_BIN        path to claude-p CLI (default 'claude-p')
+  RALPH_AGENT_BACKEND       agent backend: claude | claude-p (default 'claude')
   RALPH_CLAUDE_MODEL        agent model (default 'claude-sonnet-4-6')
   RALPH_REVIEWER_MODEL      reviewer model (default 'claude-opus-4-7')
   RALPH_FIXER_MODEL         fixer model (default 'claude-sonnet-4-6')
@@ -161,6 +167,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--review-max-rounds":
         out.overrides.reviewMaxRounds = nextInt();
         break;
+      case "--backend":
+        out.overrides.agentBackend = resolveBackend(next());
+        break;
+      case "--claude-p":
+        out.overrides.agentBackend = "claude-p";
+        break;
       case "--create-goal-stub":
         out.createGoalStub = true;
         break;
@@ -264,7 +276,24 @@ function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void
     "promptFile",
     cfg.promptFile + (existsSync(cfg.promptFile) ? "" : "  (override absent — using bundled)"),
   );
-  ok("claudeBin", cfg.claudeBin);
+  ok("agentBackend", cfg.agentBackend);
+  if (cfg.agentBackend === "claude-p") {
+    if (claudePInstalled(cfg.claudePBin)) {
+      ok(
+        "claude-p",
+        `${cfg.claudePBin} installed — pinned target v${CLAUDE_P_PINNED_VERSION} ` +
+          "(verify: `uv tool list` or `pip show claude-p`)",
+      );
+    } else {
+      warn(
+        "claude-p",
+        `${cfg.claudePBin} — not found / not runnable ` +
+          `(uv tool install 'claude-p==${CLAUDE_P_PINNED_VERSION}')`,
+      );
+    }
+  } else {
+    ok("claudeBin", cfg.claudeBin);
+  }
   ok("claudeModel", cfg.claudeModel);
   ok(
     "review",
@@ -283,6 +312,22 @@ function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void
 
   process.stdout.write(lines.join("\n") + "\n");
   process.exit(missing.length > 0 ? 1 : 0);
+}
+
+/**
+ * Best-effort `claude-p --doctor` probe for `doctor`. `claude-p --version`
+ * forwards to the underlying `claude` (drop-in `claude -p` compat), so it
+ * cannot report the wrapper's own version — `--doctor` is used purely to
+ * confirm claude-p is installed and runnable.
+ */
+function claudePInstalled(bin: string): boolean {
+  try {
+    const r = spawnSync(bin, ["--doctor"], { encoding: "utf8", timeout: 15_000 });
+    if (r.error) return false;
+    return /claude-p doctor/i.test(`${r.stdout ?? ""}${r.stderr ?? ""}`);
+  } catch {
+    return false;
+  }
 }
 
 function listArchives(archiveDir: string): void {

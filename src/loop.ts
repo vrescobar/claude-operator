@@ -22,6 +22,7 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { AgentProcess } from "./AgentProcess.js";
+import { buildInvocation, previewInvocation } from "./AgentBackend.js";
 import type { Config } from "./Config.js";
 import {
   cleanupFailedAttempt,
@@ -202,6 +203,12 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
   const startedCounters: AggregateCounters = { ...state.counters };
   const persist = (): void => saveState(cfg.stateFile, state);
 
+  // Cost / token usage accumulated by THIS run. Lifetime totals live durably
+  // in `state` (totalCostUsd / totalUsage); these track just the current run
+  // for the per-iteration "run total" line and the final summary.
+  let runCostUsd = 0;
+  let runUsage: AgentUsage = emptyUsage();
+
   // Final terminal state — captured so the summary printer in the `finally`
   // block knows which message to render and whether to return 0 vs 1.
   let runResult: RunResult = "cap";
@@ -277,8 +284,12 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       log.detail("log", relativePath(cfg.repoRoot, logFile));
       log.detail(
         "cmd",
-        `${cfg.claudeBin} --print --dangerously-skip-permissions ` +
-          `--output-format stream-json --verbose --model ${cfg.claudeModel}`,
+        `[${cfg.agentBackend}] ` +
+          previewInvocation(cfg.agentBackend, {
+            roleBin: cfg.claudeBin,
+            claudePBin: cfg.claudePBin,
+            model: cfg.claudeModel,
+          }),
       );
 
       if (hooks.dryRun || cfg.dryRun) {
@@ -334,6 +345,12 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
         iterResult.agent.costUsd +
         iterResult.subloop.reviewerCostUsd +
         iterResult.subloop.fixerCostUsd;
+      runCostUsd += totalCostUsd;
+      runUsage = addUsage(runUsage, totalUsage);
+      state.totalCostUsd += totalCostUsd;
+      state.totalUsage = addUsage(state.totalUsage, totalUsage);
+
+      const costEstimated = iterResult.agent.costEstimated;
       appendMetric(cfg.metricsFile, {
         iteration: iter,
         taskId: task.id,
@@ -345,15 +362,25 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
         review: iterResult.subloop,
         totalCostUsd,
         totalUsage,
+        costEstimated,
+        cumulativeCostUsd: state.totalCostUsd,
+        cumulativeUsage: state.totalUsage,
       });
-      // End-of-iteration human summary on the operator's terminal.
+      // End-of-iteration human summary on the operator's terminal. `≈$`
+      // flags a token-derived estimate (claude-p) vs a claude-reported cost.
+      const c$ = costEstimated ? "≈$" : "$";
       log.info(
         `iter ${iter} done — outcome=${outcome} ` +
           `wall=${humanDuration(iterDurationMs)} ` +
-          `cost=$${totalCostUsd.toFixed(4)} ` +
-          `(agent $${iterResult.agent.costUsd.toFixed(4)}, ` +
-          `review $${(iterResult.subloop.reviewerCostUsd + iterResult.subloop.fixerCostUsd).toFixed(4)}) ` +
+          `cost=${c$}${totalCostUsd.toFixed(4)} ` +
+          `(agent ${c$}${iterResult.agent.costUsd.toFixed(4)}, ` +
+          `review ${c$}${(iterResult.subloop.reviewerCostUsd + iterResult.subloop.fixerCostUsd).toFixed(4)}) ` +
           `tokens=${formatUsageInline(totalUsage)}`,
+      );
+      log.info(
+        `run total — cost=${c$}${runCostUsd.toFixed(4)} ` +
+          `tokens=${formatUsageInline(runUsage)}` +
+          (costEstimated ? "  (cost estimated from tokens — claude-p backend)" : ""),
       );
 
       if (outcome === "stop-marker") {
@@ -378,6 +405,10 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       started: startedCounters,
       ended: state.counters,
       outcomes: runOutcomes,
+      runCostUsd,
+      runUsage,
+      lifetimeCostUsd: state.totalCostUsd,
+      lifetimeUsage: state.totalUsage,
     });
     process.off("SIGINT", sigintHandler);
     process.off("SIGTERM", sigintHandler);
@@ -458,6 +489,10 @@ interface AgentMetrics {
   durationMs: number;
   apiDurationMs: number;
   numTurns: number | null;
+  /** Where the usage figures came from — see `AgentResult.usageSource`. */
+  usageSource: AgentResult["usageSource"];
+  /** True when `costUsd` is a token-derived estimate (claude-p backend). */
+  costEstimated: boolean;
 }
 
 function metricsFromAgent(r: AgentResult): AgentMetrics {
@@ -467,6 +502,8 @@ function metricsFromAgent(r: AgentResult): AgentMetrics {
     durationMs: r.durationMs,
     apiDurationMs: r.apiDurationMs ?? 0,
     numTurns: r.numTurns,
+    usageSource: r.usageSource,
+    costEstimated: r.costEstimated,
   };
 }
 
@@ -482,6 +519,8 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
     durationMs: 0,
     apiDurationMs: 0,
     numTurns: null,
+    usageSource: null,
+    costEstimated: false,
   };
   let subloop: SubloopUsage = emptySubloopUsage();
   const mk = (outcome: IterationOutcome): IterationResult => ({
@@ -496,16 +535,27 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
 
     const factory =
       hooks.agentFactory ??
-      ((c, _f, onLine) =>
-        new AgentProcess({
-          command: c.claudeBin,
+      ((c, _f, onLine) => {
+        const inv = buildInvocation(c.agentBackend, {
+          roleBin: c.claudeBin,
+          claudePBin: c.claudePBin,
+          repoRoot: c.repoRoot,
+          timeoutMs: c.claudeTimeoutMs,
+        });
+        return new AgentProcess({
+          command: inv.command,
+          extraArgs: inv.extraArgs,
+          promptViaStdin: inv.promptViaStdin,
+          sessionId: inv.sessionId,
+          recoverUsage: c.agentBackend === "claude-p",
           model: c.claudeModel,
           timeoutMs: c.claudeTimeoutMs,
           cwd: c.repoRoot,
           logStream: stream,
           onLine,
           maxBufferBytes: c.agentMaxBufferBytes,
-        }));
+        });
+      });
     const agent = factory(cfg, logFile, log.streamAgentLine);
     ctx.registerAgent(agent);
 
@@ -758,6 +808,12 @@ interface MetricLine {
   totalCostUsd: number;
   /** Pre-computed roll-up of every model call in this iteration. */
   totalUsage: AgentUsage;
+  /** True when `totalCostUsd` is a token-derived estimate (claude-p backend). */
+  costEstimated: boolean;
+  /** Lifetime cost across all runs, AFTER this iteration (USD). */
+  cumulativeCostUsd: number;
+  /** Lifetime token usage across all runs, AFTER this iteration. */
+  cumulativeUsage: AgentUsage;
 }
 
 function appendMetric(metricsFile: string, line: MetricLine): void {
@@ -799,6 +855,12 @@ interface FinalStatusCtx {
   started: AggregateCounters;
   ended: AggregateCounters;
   outcomes: ReadonlyArray<IterationOutcome>;
+  /** Cost / usage accumulated by this run. */
+  runCostUsd: number;
+  runUsage: AgentUsage;
+  /** Lifetime cost / usage across all runs (from state.json). */
+  lifetimeCostUsd: number;
+  lifetimeUsage: AgentUsage;
 }
 
 function diffCounters(s: AggregateCounters, e: AggregateCounters): AggregateCounters {
@@ -862,6 +924,15 @@ function printFinalStatus(ctx: FinalStatusCtx): void {
 
   log.info(`this run:  ${formatCounters(perRun)}`);
   log.info(`lifetime:  ${formatCounters(ended)}`);
+  // Cost prefixed `~` — the claude-p backend reports estimates; the claude
+  // backend reports real figures. We don't track which per run, so the `~`
+  // stays as an honest "may include estimates" marker.
+  log.info(
+    `run cost:  ~$${ctx.runCostUsd.toFixed(4)}  tokens ${formatUsageInline(ctx.runUsage)}`,
+  );
+  log.info(
+    `lifetime cost: ~$${ctx.lifetimeCostUsd.toFixed(4)}  tokens ${formatUsageInline(ctx.lifetimeUsage)}`,
+  );
 }
 
 function safeCountOpenTasks(path: string): number {

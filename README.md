@@ -1,6 +1,6 @@
 # ralphloop
 
-Project-agnostic autonomous coding loop, extracted from the `mikoshi` project.
+Project-agnostic autonomous coding loop.
 
 Reads a checklist (`tasks.md`), spawns Claude (`claude -p`) per task, runs tests,
 commits successful tasks, retries failures, sleeps on rate-limits. Halts when
@@ -174,7 +174,3 @@ bun install
 bun test
 bun run typecheck
 ```
-
-## Provenance
-
-Extracted from `mikoshi@b33be7ec` on 2026-05-12.

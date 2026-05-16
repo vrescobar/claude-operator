@@ -1,7 +1,7 @@
 {
   "name": "@vrescobar/ralphloop",
   "version": "0.1.0",
-  "description": "Project-agnostic autonomous coding loop. Reads a checklist, spawns Claude per task, runs tests, commits, retries — extracted from the mikoshi project.",
+  "description": "Project-agnostic autonomous coding loop. Reads a checklist, spawns Claude per task, runs tests, commits, retries.",
   "type": "module",
   "private": true,
   "bin": {

@@ -70,6 +70,13 @@ export interface SubloopCtx {
   fixerAgentFactory?: RunFixerOptions["agentFactory"];
   /** Test-only override of the timestamp used in log filenames. */
   timestamp?: () => string;
+  /**
+   * Alternate reviewer prompt (absolute path). The integration review passes
+   * `prompts/integration-review.md`; normal runs leave it unset.
+   */
+  reviewerPromptFile?: string;
+  /** Extra context appended to reviewer + fixer prompts (e.g. the design spec). */
+  extraContext?: string;
 }
 
 export async function runReviewSubloop(ctx: SubloopCtx): Promise<SubloopOutcome> {
@@ -341,6 +348,8 @@ async function runReviewerWithRlBudget(
       registerAgent: ctx.registerAgent,
       clearAgent: ctx.clearAgent,
       agentFactory: ctx.reviewerAgentFactory,
+      promptFile: ctx.reviewerPromptFile,
+      extraContext: ctx.extraContext,
     });
     log.stage(
       "reviewer.exit",
@@ -384,6 +393,7 @@ async function runFixerWithRlBudget(
       registerAgent: ctx.registerAgent,
       clearAgent: ctx.clearAgent,
       agentFactory: ctx.fixerAgentFactory,
+      extraContext: ctx.extraContext,
     });
     log.stage(
       "fixer.exit",

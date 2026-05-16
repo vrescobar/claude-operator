@@ -22,7 +22,7 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { AgentProcess } from "./AgentProcess.js";
-import { buildInvocation, previewInvocation } from "./AgentBackend.js";
+import { buildInvocation, previewInvocation, type AgentBackend } from "./AgentBackend.js";
 import type { Config } from "./Config.js";
 import {
   cleanupFailedAttempt,
@@ -48,6 +48,7 @@ import {
   countOpenTasks,
   findNextOpenTask,
   isTaskMarkedDone,
+  listBlockedTaskIds,
   markTaskBlocked,
   revertTaskToPending,
 } from "./TaskFile.js";
@@ -152,6 +153,11 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
   const log = new Logger({ verbose: cfg.verbose });
   log.info(`ralph starting (model=${cfg.claudeModel}, max=${cfg.maxIterations})`);
   if (cfg.dryRun) log.warn("dry-run mode: no claude / tests / commits");
+  if (cfg.runMode === "retry-blocked") {
+    log.info(
+      "retry-blocked mode — per-task review off; Opus integration review runs after the batch",
+    );
+  }
 
   let lock: Lockfile;
   try {
@@ -224,6 +230,10 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
   // pin the loop at a flat 5 min retry.
   let rlStreakTaskId: string | null = null;
   let rlStreak = 0;
+  // Consecutive transient-server-error (HTTP 5xx) hits for the current task.
+  // Same per-task scope as the rate-limit streak; drives the 5xx backoff and
+  // the run-halt safety cap.
+  let seStreak = 0;
 
   try {
     for (let iter = 1; iter <= cfg.maxIterations; iter++) {
@@ -250,6 +260,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       if (rlStreakTaskId !== task.id) {
         rlStreakTaskId = task.id;
         rlStreak = 0;
+        seStreak = 0;
       }
 
       const taskState = getTaskState(state, task.id);
@@ -268,6 +279,8 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
           `- task #${task.id} blocked: ${reason}`,
         );
         taskState.blocked = true;
+        taskState.blockedAt = new Date().toISOString();
+        taskState.timesBlocked++;
         state.counters.blocked++;
         persist();
         continue;
@@ -306,6 +319,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       // 1 on first hit for the task, 2 on the second, etc. Used inside
       // `runIteration` to grow the no-reset-time fallback.
       const nextRlHitNumber = rlStreak + 1;
+      const nextSeHitNumber = seStreak + 1;
 
       const iterResult = await runIteration({
         cfg,
@@ -324,13 +338,23 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
           activeAgent = null;
         },
         rlHitNumber: nextRlHitNumber,
+        seHitNumber: nextSeHitNumber,
       });
       const outcome = iterResult.outcome;
 
-      // Maintain the streak: only "rate-limited" extends it, everything
-      // else resets to zero (including a clean iteration).
+      // Maintain the streaks: only the matching infra outcome extends each,
+      // everything else (including a clean iteration) resets to zero.
       if (outcome === "rate-limited") rlStreak++;
       else rlStreak = 0;
+      if (outcome === "server-error") seStreak++;
+      else seStreak = 0;
+
+      // Infrastructure failures (rate-limit, transient 5xx) are not the
+      // task's fault — refund the attempt pre-charged before runIteration so a
+      // provider outage can never exhaust a task's attempt budget.
+      if (outcome === "rate-limited" || outcome === "server-error") {
+        taskState.attempts = Math.max(0, attempt - 1);
+      }
 
       runOutcomes.push(outcome);
       persist();
@@ -360,6 +384,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
         finishedAt: new Date().toISOString(),
         agent: iterResult.agent,
         review: iterResult.subloop,
+        agentBackend: cfg.agentBackend,
         totalCostUsd,
         totalUsage,
         costEstimated,
@@ -382,6 +407,20 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
           `tokens=${formatUsageInline(runUsage)}` +
           (costEstimated ? "  (cost estimated from tokens — claude-p backend)" : ""),
       );
+
+      if (outcome === "server-error" && seStreak >= cfg.serverErrorMaxConsecutive) {
+        log.error(
+          `${seStreak} consecutive API server errors — halting run. ` +
+            `Task #${task.id} stays open ([ ]); re-run later to resume.`,
+        );
+        appendProgressNote(
+          cfg.progressFile,
+          `- run halted after ${seStreak} consecutive API server errors — ` +
+            `task #${task.id} left open for a later run`,
+        );
+        runResult = "halted-server-errors";
+        return exitCodeForResult(runResult, startedCounters, state.counters, runOutcomes);
+      }
 
       if (outcome === "stop-marker") {
         runResult = "complete-marker";
@@ -422,7 +461,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
  *  - `complete-empty`: no `[ ]` tasks left in tasks.md.
  *  - `cap`: iteration budget exhausted before either of the above.
  */
-type RunResult = "complete-marker" | "complete-empty" | "cap";
+type RunResult = "complete-marker" | "complete-empty" | "cap" | "halted-server-errors";
 
 /**
  * Iteration outcomes that mean the agent didn't make forward progress.
@@ -443,6 +482,9 @@ function exitCodeForResult(
   ended: AggregateCounters,
   outcomes: ReadonlyArray<IterationOutcome>,
 ): number {
+  // A server-outage halt didn't finish the work — exit non-zero so automation
+  // knows to come back, even though nothing is the loop's (or a task's) fault.
+  if (result === "halted-server-errors") return 1;
   if (result !== "cap") return 0;
   const failedThisRun = ended.testFailures - started.testFailures;
   const blockedThisRun = ended.blocked - started.blocked;
@@ -473,6 +515,12 @@ interface IterationCtx {
    * >= 1.
    */
   rlHitNumber: number;
+  /**
+   * Consecutive transient-server-error hits for this task INCLUDING the
+   * current iteration if it ends up a 5xx. Drives the server-error backoff
+   * curve. Always >= 1.
+   */
+  seHitNumber: number;
 }
 
 interface IterationResult {
@@ -493,6 +541,8 @@ interface AgentMetrics {
   usageSource: AgentResult["usageSource"];
   /** True when `costUsd` is a token-derived estimate (claude-p backend). */
   costEstimated: boolean;
+  /** Session id of this agent run — locates its `~/.claude/projects` transcript. */
+  sessionId: string | null;
 }
 
 function metricsFromAgent(r: AgentResult): AgentMetrics {
@@ -504,6 +554,7 @@ function metricsFromAgent(r: AgentResult): AgentMetrics {
     numTurns: r.numTurns,
     usageSource: r.usageSource,
     costEstimated: r.costEstimated,
+    sessionId: r.sessionId,
   };
 }
 
@@ -521,6 +572,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
     numTurns: null,
     usageSource: null,
     costEstimated: false,
+    sessionId: null,
   };
   let subloop: SubloopUsage = emptySubloopUsage();
   const mk = (outcome: IterationOutcome): IterationResult => ({
@@ -592,6 +644,32 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
         return mk("agent-failed");
       }
       return mk("rate-limited");
+    }
+
+    // Transient API 5xx / overloaded — back off and retry. The outer loop
+    // refunds the attempt, so a provider outage never blocks the task.
+    if (result.serverError) {
+      const sleep = computeSleepUntil(
+        { until: null, reason: result.serverError.reason },
+        cfg.serverErrorRetryBaseMs,
+        cfg.rateLimitJitterMs,
+        () => new Date(),
+        cfg.minRateLimitSleepMs,
+        ctx.seHitNumber,
+        cfg.serverErrorRetryCapMs,
+      );
+      log.warn(
+        `API server error (${result.serverError.reason}) — backing off ` +
+          `${humanDuration(sleep.sleepMs)} then retrying (attempt not consumed)`,
+      );
+      try {
+        await sleepUntil(sleep.target, ctx.abortSignal);
+      } catch (err) {
+        const e = err as Error;
+        log.warn(`server-error backoff aborted: ${e.message}`);
+        return mk("agent-failed");
+      }
+      return mk("server-error");
     }
 
     if (result.timedOut) {
@@ -804,6 +882,8 @@ interface MetricLine {
   agent: AgentMetrics;
   /** Reviewer + fixer aggregate metrics across every sub-loop round. */
   review: SubloopUsage;
+  /** Agent backend that drove this iteration (`claude` / `claude-p`). */
+  agentBackend: AgentBackend;
   /** Pre-computed roll-up so dashboards can `jq '.totalCostUsd' metrics.jsonl`. */
   totalCostUsd: number;
   /** Pre-computed roll-up of every model call in this iteration. */
@@ -920,6 +1000,12 @@ function printFinalStatus(ctx: FinalStatusCtx): void {
       }
       break;
     }
+    case "halted-server-errors":
+      log.warn(
+        "ralph halted — too many consecutive API server errors (provider outage). " +
+          "No task was blocked; re-run to resume where it left off.",
+      );
+      break;
   }
 
   log.info(`this run:  ${formatCounters(perRun)}`);
@@ -933,6 +1019,15 @@ function printFinalStatus(ctx: FinalStatusCtx): void {
   log.info(
     `lifetime cost: ~$${ctx.lifetimeCostUsd.toFixed(4)}  tokens ${formatUsageInline(ctx.lifetimeUsage)}`,
   );
+
+  // Yellow alert: blocked tasks need an explicit `retry-blocked` to come back.
+  const blocked = safeListBlockedTaskIds(cfg.tasksFile);
+  if (blocked.length > 0) {
+    log.warn(
+      `⚠ ${blocked.length} blocked task(s) [!]: ${blocked.join(", ")} — ` +
+        `run 'ralphloop retry-blocked' to requeue them`,
+    );
+  }
 }
 
 function safeCountOpenTasks(path: string): number {
@@ -940,6 +1035,14 @@ function safeCountOpenTasks(path: string): number {
     return countOpenTasks(path);
   } catch {
     return 0;
+  }
+}
+
+function safeListBlockedTaskIds(path: string): string[] {
+  try {
+    return listBlockedTaskIds(path);
+  } catch {
+    return [];
   }
 }
 
@@ -1014,7 +1117,7 @@ function buildPrompt(cfg: Config, task: TaskRef, attempt: number): string {
   ].join("\n");
 }
 
-async function defaultRunTests(
+export async function defaultRunTests(
   cfg: Config,
   _log: Logger,
 ): Promise<TestRunResult> {

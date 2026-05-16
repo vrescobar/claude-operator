@@ -27,6 +27,10 @@ export interface TaskState {
   lastAttemptAt: string | null;
   /** True when the task has been moved to `[!]` in tasks.md. */
   blocked: boolean;
+  /** ISO timestamp of the most recent block — drives the retry-blocked cooldown. */
+  blockedAt: string | null;
+  /** How many times this task has been blocked-and-reopened across its life. */
+  timesBlocked: number;
 }
 
 export interface AggregateCounters {
@@ -120,12 +124,20 @@ export function saveState(path: string, state: LoopState): void {
 
 export function getTaskState(state: LoopState, id: string): TaskState {
   const existing = state.tasks[id];
-  if (existing) return existing;
+  if (existing) {
+    // Backfill fields added in a later schema revision so old state.json
+    // files keep working without a migration step.
+    if (existing.blockedAt === undefined) existing.blockedAt = null;
+    if (existing.timesBlocked === undefined) existing.timesBlocked = 0;
+    return existing;
+  }
   const fresh: TaskState = {
     attempts: 0,
     noChangeAttempts: 0,
     lastAttemptAt: null,
     blocked: false,
+    blockedAt: null,
+    timesBlocked: 0,
   };
   state.tasks[id] = fresh;
   return fresh;

@@ -24,6 +24,17 @@ export interface RateLimitInfo {
 }
 
 /**
+ * Result of a transient server-error (HTTP 5xx / overloaded) detection pass.
+ * Unlike a rate-limit, a 5xx never carries a reset time — the loop always
+ * falls back to an exponential backoff curve. A 5xx is infrastructure, not the
+ * task's fault, so it must NOT consume the task's attempt budget.
+ */
+export interface ServerErrorInfo {
+  /** Human-readable reason — used for the console log line. */
+  reason: string;
+}
+
+/**
  * Token / cost usage for one agent invocation. Populated when claude is
  * invoked with `--output-format stream-json` and the final `result` event is
  * parsed; null when the run produced plain-text output (e.g. fake-claude in
@@ -81,6 +92,23 @@ export interface AgentResult {
   /** Populated when rate-limit text was detected in stdout/stderr. */
   rateLimit: RateLimitInfo | null;
   /**
+   * True when the trailing stream-json `result` event reported `is_error`.
+   * A machine-readable signal (not the agent merely discussing errors).
+   */
+  isError: boolean;
+  /**
+   * Populated when a transient server error (HTTP 5xx / overloaded) was
+   * detected — `isError` plus a 5xx pattern in the output. Drives a
+   * backoff-and-retry that does not consume the task's attempt budget.
+   */
+  serverError: ServerErrorInfo | null;
+  /**
+   * Session id this run was launched with (the `claude-p` backend forces one
+   * via `--session-id`). Null for the `claude` backend. Surfaced so callers
+   * can record it and locate the persisted transcript.
+   */
+  sessionId: string | null;
+  /**
    * Where `usage` came from:
    *  - `"stream-json"` — claude's own `result` event (the `claude` backend).
    *  - `"session-jsonl"` — recovered from the persisted session transcript
@@ -117,6 +145,8 @@ export type IterationOutcome =
   | "stop-marker"
   | "no-tasks"
   | "rate-limited"
+  /** Transient HTTP 5xx / overloaded error — retried, does not consume an attempt. */
+  | "server-error"
   | "agent-failed"
   | "tests-failed"
   | "no-changes-retry"

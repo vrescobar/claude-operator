@@ -58,6 +58,8 @@ export interface RalphloopConfigFile {
   };
   /** Auto-archive fully-closed `## Phase N` sections from tasks.md. Default true. */
   autoArchiveClosedPhases?: boolean;
+  /** Hours a `[!]` task must stay blocked before `retry-blocked` reopens it. Default 6. */
+  blockedRetryCooldownHours?: number;
 }
 
 export interface WorkspaceResolution {

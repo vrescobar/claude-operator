@@ -86,6 +86,35 @@ therefore estimates — shown with a `≈$` / `~$` prefix — and the price tabl
 must be kept current. There is no quota budget: when Claude rate-limits, the
 loop simply waits out the reset window as it always has.
 
+## Resilience & blocked tasks
+
+**Transient API 5xx errors** (`API Error: 500`, `overloaded_error`, …) are
+infrastructure, not a task failure. The loop backs off and retries them
+*without* consuming the task's attempt budget, so a provider outage can never
+permanently block sound work. After `serverErrorMaxConsecutive` (default 20)
+back-to-back 5xx hits the run halts cleanly — the task stays `[ ]` and a later
+run resumes it. Tunables: `RALPH_SERVER_ERROR_RETRY_BASE_MS` /
+`RALPH_SERVER_ERROR_RETRY_CAP_MS` / `RALPH_SERVER_ERROR_MAX_CONSECUTIVE`.
+
+**Blocked tasks** — a task that exhausts its attempt limit is moved to `[!]`
+and skipped by future `run`s. At the end of every run, a yellow line reports
+how many `[!]` tasks remain. To revisit them:
+
+```sh
+bun ./ralphloop/bin/ralphloop.ts retry-blocked            # honours the cooldown
+bun ./ralphloop/bin/ralphloop.ts retry-blocked --force    # ignore the cooldown
+```
+
+`retry-blocked` is a distinct loop mode: it reopens the `[!]` tasks (resetting
+their attempt counters), reruns them **with the per-task reviewer→fixer
+sub-loop disabled**, and then runs **one final integration review on Opus**
+over the whole batch (`firstSha..HEAD`). That review embeds the design spec
+(`GOAL.md`) and checks the batch is coherent — all features implemented, tests
+green, no interdependency breakage — since the reopened tasks were redone out
+of order. Its findings *and* fixes both run on Opus. A `[!]` task is only
+eligible once it has been blocked at least `blockedRetryCooldownHours` (default
+6) — `--force` bypasses that.
+
 ## Config precedence
 
 CLI flag > env var > `.ralphloop/config.yaml` > built-in default.

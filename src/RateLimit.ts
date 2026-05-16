@@ -15,7 +15,7 @@
  * process exits and stamps the result on `AgentResult.rateLimit`.
  */
 
-import type { RateLimitInfo } from "./types.js";
+import type { RateLimitInfo, ServerErrorInfo } from "./types.js";
 
 interface Pattern {
   /** Regex run over the combined output. */
@@ -115,6 +115,22 @@ export function detectRateLimit(output: string): RateLimitInfo | null {
     return { until: null, reason: g[0]!.toLowerCase() };
   }
   return null;
+}
+
+// ── Transient server error (HTTP 5xx / overloaded) ──────────────────────────
+const SERVER_ERROR_RE =
+  /(api error:\s*5\d\d|\boverloaded_error\b|internal server error|service unavailable|bad gateway|gateway timeout)/i;
+
+/**
+ * Detect a transient server-side failure (HTTP 5xx / overloaded) in the agent
+ * output. Same tail-scan + code-fence stripping as `detectRateLimit` so an
+ * agent that writes *about* 500s does not trigger it. The caller gates this on
+ * a machine-readable signal (the stream-json `result` event's `is_error`), so
+ * the pattern only has to confirm the failure class.
+ */
+export function detectServerError(output: string): ServerErrorInfo | null {
+  const m = SERVER_ERROR_RE.exec(sanitiseForRateLimitScan(output));
+  return m ? { reason: m[0]!.toLowerCase() } : null;
 }
 
 function sanitiseForRateLimitScan(output: string): string {

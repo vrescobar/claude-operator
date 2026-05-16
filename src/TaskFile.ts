@@ -107,6 +107,38 @@ export function isTaskBlocked(path: string, id: string): boolean {
   });
 }
 
+/**
+ * Flip `[!]` → `[ ]` for the task with this id, requeueing it for the loop.
+ * No-op if not found / not blocked. Returns true iff a line was mutated.
+ * Used by `ralphloop retry-blocked`.
+ */
+export function reopenBlockedTask(path: string, id: string): boolean {
+  const original = readFileSync(path, "utf8");
+  const lines = original.split("\n");
+  let mutated = false;
+  for (let i = 0; i < lines.length; i++) {
+    const m = BLOCKED_LINE_RE.exec(lines[i]!);
+    if (m && m[1] === id) {
+      lines[i] = lines[i]!.replace("[!]", "[ ]");
+      mutated = true;
+      break;
+    }
+  }
+  if (mutated) atomicWriteFileSync(path, lines.join("\n"));
+  return mutated;
+}
+
+/** Ids of every `[!]` blocked task line, in file order. */
+export function listBlockedTaskIds(path: string): string[] {
+  const lines = readFileSync(path, "utf8").split("\n");
+  const ids: string[] = [];
+  for (const ln of lines) {
+    const m = BLOCKED_LINE_RE.exec(ln);
+    if (m) ids.push(m[1]!);
+  }
+  return ids;
+}
+
 /** Count of `[ ]` (open, not blocked, not done) task lines in the file. */
 export function countOpenTasks(path: string): number {
   const lines = readFileSync(path, "utf8").split("\n");

@@ -46,6 +46,10 @@ export interface RunReviewerOptions {
   clearAgent: () => void;
   /** Test-only override; defaults to `new AgentProcess(...)`. */
   agentFactory?: (logStream: Writable) => AgentProcess;
+  /** Absolute path to an alternate reviewer prompt. Default: prompts/reviewer.md. */
+  promptFile?: string;
+  /** Extra text appended to the runtime-context block (e.g. the design spec). */
+  extraContext?: string;
 }
 
 export interface ReviewerOutput {
@@ -58,7 +62,15 @@ export async function runReviewer(opts: RunReviewerOptions): Promise<ReviewerOut
 
   const stream = createWriteStream(logFile, { flags: "a" });
   try {
-    const prompt = buildPrompt(cfg, task, round, testsOk, originalSha);
+    const prompt = buildPrompt(
+      cfg,
+      task,
+      round,
+      testsOk,
+      originalSha,
+      opts.promptFile,
+      opts.extraContext,
+    );
 
     const factory =
       opts.agentFactory ??
@@ -106,8 +118,10 @@ function buildPrompt(
   round: number,
   testsOk: boolean,
   originalSha: string | null,
+  promptFile?: string,
+  extraContext?: string,
 ): string {
-  const base = readFileSync(PROMPT_FILE, "utf8");
+  const base = readFileSync(promptFile ?? PROMPT_FILE, "utf8");
   const shortSha = originalSha ? originalSha.slice(0, 12) : "HEAD";
   const reviewLines = originalSha
     ? [
@@ -131,6 +145,9 @@ function buildPrompt(
     `  Tests currently: ${testsOk ? "passing" : "failing"}`,
     `  Original task commit: ${shortSha}`,
     ...reviewLines.map((l) => `  ${l}`),
+    ...(extraContext && extraContext.trim().length > 0
+      ? ["", extraContext.trim()]
+      : []),
     "─".repeat(72),
     "",
   ].join("\n");

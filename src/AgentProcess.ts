@@ -22,7 +22,7 @@ import { execa, type ResultPromise } from "execa";
 import type { Writable } from "node:stream";
 import { stripAnsi } from "./Logger.js";
 import { estimateCostUsd } from "./Pricing.js";
-import { detectRateLimit } from "./RateLimit.js";
+import { detectRateLimit, detectServerError } from "./RateLimit.js";
 import { readSessionUsage } from "./SessionUsage.js";
 import type { AgentResult, AgentUsage } from "./types.js";
 
@@ -228,9 +228,8 @@ export class AgentProcess {
     // false-positive when the agent is itself a coding agent reading or
     // writing code about rate limits.
     const failed = exitCode !== 0 || timedOut;
-    const rateLimit = failed
-      ? detectRateLimit(`${stdout}\n${stderr}`)
-      : null;
+    const combinedOutput = `${stdout}\n${stderr}`;
+    const rateLimit = failed ? detectRateLimit(combinedOutput) : null;
 
     // Pull usage + final assistant text out of the stream-json aggregator.
     // Fallback when no stream-json `result` event was seen: stdout-as-text,
@@ -266,6 +265,14 @@ export class AgentProcess {
       }
     }
 
+    // Transient server error (HTTP 5xx / overloaded). Gated on the
+    // machine-readable `result.is_error` signal (a clean-exit error run, as
+    // claude-p produces on a 5xx) or any non-clean exit, so the pattern scan
+    // can't false-positive on an agent that merely writes about 5xx.
+    const isError = final.isError;
+    const serverError =
+      isError || failed ? detectServerError(combinedOutput) : null;
+
     return {
       exitCode,
       signal,
@@ -280,6 +287,9 @@ export class AgentProcess {
       timedOut,
       killed,
       rateLimit,
+      isError,
+      serverError,
+      sessionId: this.opts.sessionId ?? null,
       usageSource,
       costEstimated,
     };
@@ -352,6 +362,7 @@ class StreamJsonAggregator {
   private costUsd: number | null = null;
   private apiDurationMs: number | null = null;
   private numTurns: number | null = null;
+  private isError = false;
 
   consume(rawLine: string): string[] {
     const line = rawLine.trim();
@@ -379,9 +390,17 @@ class StreamJsonAggregator {
     costUsd: number | null;
     apiDurationMs: number | null;
     numTurns: number | null;
+    isError: boolean;
   } {
     if (!this.sawStreamJson) {
-      return { text: null, usage: null, costUsd: null, apiDurationMs: null, numTurns: null };
+      return {
+        text: null,
+        usage: null,
+        costUsd: null,
+        apiDurationMs: null,
+        numTurns: null,
+        isError: false,
+      };
     }
     return {
       text: this.finalText,
@@ -389,6 +408,7 @@ class StreamJsonAggregator {
       costUsd: this.costUsd,
       apiDurationMs: this.apiDurationMs,
       numTurns: this.numTurns,
+      isError: this.isError,
     };
   }
 
@@ -441,7 +461,10 @@ class StreamJsonAggregator {
             `tokens=${formatUsageInline(this.usage)} ` +
             `api=${formatMs(this.apiDurationMs)}`,
         ];
-        if (event.is_error) lines.push(`[error] ${event.api_error_status ?? "unknown"}`);
+        if (event.is_error) {
+          this.isError = true;
+          lines.push(`[error] ${event.api_error_status ?? "unknown"}`);
+        }
         return lines;
       }
 

@@ -105,6 +105,17 @@ export interface Config {
    */
   minRateLimitSleepMs: number;
   /**
+   * Transient HTTP 5xx / "overloaded" errors are infrastructure, not the
+   * task's fault. The loop retries them with an exponential backoff
+   * `min(serverErrorRetryCapMs, serverErrorRetryBaseMs * 3^(n-1))` and does
+   * NOT consume the task's attempt budget. After `serverErrorMaxConsecutive`
+   * back-to-back 5xx hits the run halts cleanly (the task stays `[ ]`, never
+   * `[!]`), so a sustained outage never permanently blocks a task.
+   */
+  serverErrorRetryBaseMs: number;
+  serverErrorRetryCapMs: number;
+  serverErrorMaxConsecutive: number;
+  /**
    * `maxBuffer` passed to execa for the agent subprocess. Caps how much the
    * parent will buffer in memory before the agent's stdout/stderr cause a
    * MaxBufferError. Default 50 MB — the per-iteration log file is the source
@@ -169,6 +180,20 @@ export interface Config {
   /** Halt the sub-loop after this many consecutive reviewer crashes / UNKNOWN verdicts. */
   reviewMaxReviewerFailures: number;
 
+  /**
+   * A `[!]` blocked task is eligible for `ralphloop retry-blocked` only once
+   * it has been blocked at least this many hours (still-cooling tasks are
+   * skipped unless `--force`).
+   */
+  blockedRetryCooldownHours: number;
+  /**
+   * `"normal"` — the standard run. `"retry-blocked"` — the special mode the
+   * `retry-blocked` subcommand uses: per-task review is forced off and a final
+   * Opus integration review runs over the whole reopened batch. Set by the
+   * subcommand, never from env / config.yaml.
+   */
+  runMode: "normal" | "retry-blocked";
+
   /** Stream every claude output line to the console live. */
   verbose: boolean;
   /** Skip claude / tests / commit; only print what would be done. */
@@ -203,6 +228,8 @@ export interface ConfigOverrides {
   dryRun?: boolean;
   /** Override the agent backend at the CLI level (`--backend` / `--claude-p`). */
   agentBackend?: AgentBackend;
+  /** Loop mode — set to `"retry-blocked"` by the `retry-blocked` subcommand. */
+  runMode?: "normal" | "retry-blocked";
   maxIterations?: number;
   reviewEnabled?: boolean;
   reviewMaxRounds?: number;
@@ -301,6 +328,15 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     rateLimitFallbackCapMs: intEnv("RALPH_RATE_LIMIT_FALLBACK_CAP_MS", 60 * 60 * 1000, env),
     rateLimitJitterMs: intEnv("RALPH_RATE_LIMIT_JITTER_MS", 30_000, env),
     minRateLimitSleepMs: intEnv("RALPH_MIN_RATE_LIMIT_SLEEP_MS", 10_000, env),
+    serverErrorRetryBaseMs: intEnv("RALPH_SERVER_ERROR_RETRY_BASE_MS", 30_000, env),
+    serverErrorRetryCapMs: intEnv("RALPH_SERVER_ERROR_RETRY_CAP_MS", 10 * 60 * 1000, env),
+    serverErrorMaxConsecutive: intEnv("RALPH_SERVER_ERROR_MAX_CONSECUTIVE", 20, env),
+    blockedRetryCooldownHours: intEnv(
+      "RALPH_BLOCKED_RETRY_COOLDOWN_HOURS",
+      cfgFile.blockedRetryCooldownHours ?? 6,
+      env,
+    ),
+    runMode: overrides.runMode ?? "normal",
     agentMaxBufferBytes: intEnv("RALPH_AGENT_MAX_BUFFER_BYTES", 50 * 1024 * 1024, env),
     typecheckEnabled: boolEnv("RALPH_TYPECHECK_ENABLED", true, env),
     logRetentionDays: intEnv("RALPH_LOG_RETENTION_DAYS", 14, env),

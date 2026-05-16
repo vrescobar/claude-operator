@@ -16,11 +16,17 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import type { AgentProcess } from "../src/AgentProcess.js";
 import { CLAUDE_P_PINNED_VERSION, resolveBackend } from "../src/AgentBackend.js";
-import { loadConfig, type ConfigOverrides } from "../src/Config.js";
-import { runLoop } from "../src/loop.js";
+import { loadConfig, type Config, type ConfigOverrides } from "../src/Config.js";
+import { currentHeadSha } from "../src/GitOps.js";
+import { Logger } from "../src/Logger.js";
+import { defaultRunTests, runLoop } from "../src/loop.js";
 import { archiveClosedPhases } from "../src/PhaseArchive.js";
+import { runIntegrationReview } from "../src/review/integration.js";
 import { runInit } from "../src/scaffolder.js";
+import { getTaskState, loadState, saveState } from "../src/State.js";
+import { listBlockedTaskIds, reopenBlockedTask } from "../src/TaskFile.js";
 import { formatLocal } from "../src/time.js";
 import { resolveWorkspace, type WorkspaceCliFlags } from "../src/workspace.js";
 
@@ -28,6 +34,8 @@ const HELP = `Usage: ralphloop <subcommand> [options]
 
 Subcommands:
   run                       drive the autonomous loop (default)
+  retry-blocked             reopen [!] blocked tasks, rerun them, then run a
+                            final Opus integration review over the batch
   init                      scaffold .ralphloop/ in cwd
   doctor                    print resolved Config + validate workspace
   archive ls                list rotated progress archives
@@ -51,6 +59,12 @@ Common options (apply to every subcommand):
   --backend <name>          agent backend: claude-p (default) or claude
   --claude-p                shorthand for --backend claude-p
 
+\`retry-blocked\` options:
+  --force                   reopen blocked tasks even if still within the
+                            cooldown window (RALPH_BLOCKED_RETRY_COOLDOWN_HOURS)
+  --max-iterations <N>      iteration cap for the rerun
+  --verbose                 stream every agent line to the console
+
 \`init\` options:
   --create-goal-stub        create a stub GOAL.md at <repoRoot> if missing
 
@@ -69,11 +83,13 @@ Config precedence: CLI flag > env var > .ralphloop/config.yaml > built-in defaul
 `;
 
 interface ParsedArgs {
-  subcommand: "run" | "init" | "doctor" | "archive" | "help";
+  subcommand: "run" | "retry-blocked" | "init" | "doctor" | "archive" | "help";
   archiveAction?: "ls" | "phases";
   workspaceFlags: WorkspaceCliFlags;
   overrides: ConfigOverrides;
   createGoalStub: boolean;
+  /** `--force` — reopen blocked tasks despite the cooldown (retry-blocked). */
+  force: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -82,13 +98,14 @@ function parseArgs(argv: string[]): ParsedArgs {
     workspaceFlags: {},
     overrides: {},
     createGoalStub: false,
+    force: false,
   };
 
   // Optional leading subcommand
   let i = 0;
   if (argv[0] && !argv[0].startsWith("-")) {
     const sub = argv[0];
-    if (sub === "run" || sub === "init" || sub === "doctor") {
+    if (sub === "run" || sub === "init" || sub === "doctor" || sub === "retry-blocked") {
       out.subcommand = sub;
       i = 1;
     } else if (sub === "archive") {
@@ -176,6 +193,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--create-goal-stub":
         out.createGoalStub = true;
         break;
+      case "--force":
+        out.force = true;
+        break;
       default:
         if (a.startsWith("--")) {
           process.stderr.write(`ralphloop: unknown flag '${a}'\n`);
@@ -201,6 +221,15 @@ async function main(): Promise<void> {
     case "run": {
       const cfg = loadConfig({ workspace, overrides: args.overrides });
       const code = await runLoop(cfg);
+      process.exit(code);
+      break;
+    }
+    case "retry-blocked": {
+      const cfg = loadConfig({
+        workspace,
+        overrides: { ...args.overrides, runMode: "retry-blocked", reviewEnabled: false },
+      });
+      const code = await runRetryBlocked(cfg, args.force);
       process.exit(code);
       break;
     }
@@ -312,6 +341,118 @@ function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void
 
   process.stdout.write(lines.join("\n") + "\n");
   process.exit(missing.length > 0 ? 1 : 0);
+}
+
+/**
+ * `retry-blocked` — reopen `[!]` blocked tasks, rerun them with per-task
+ * review off, then run one Opus integration review over the whole batch.
+ */
+async function runRetryBlocked(cfg: Config, force: boolean): Promise<number> {
+  if (!existsSync(cfg.tasksFile)) {
+    process.stderr.write(`ralphloop: tasks file missing: ${cfg.tasksFile}\n`);
+    return 2;
+  }
+  const blockedIds = listBlockedTaskIds(cfg.tasksFile);
+  if (blockedIds.length === 0) {
+    process.stdout.write("ralphloop: no blocked [!] tasks to retry.\n");
+    return 0;
+  }
+
+  const state = loadState(cfg.stateFile);
+  const cooldownMs = cfg.blockedRetryCooldownHours * 3_600_000;
+  const now = Date.now();
+  const reopened: string[] = [];
+
+  process.stdout.write(`ralphloop: ${blockedIds.length} blocked task(s) found\n`);
+  for (const id of blockedIds) {
+    const ts = state.tasks[id];
+    const blockedAtMs = ts?.blockedAt ? Date.parse(ts.blockedAt) : NaN;
+    const ageMs = Number.isFinite(blockedAtMs) ? now - blockedAtMs : Infinity;
+    if (!force && Number.isFinite(blockedAtMs) && ageMs < cooldownMs) {
+      process.stdout.write(
+        `  · #${id} — blocked ${formatAge(ageMs)} ago, ` +
+          `cooldown ${cfg.blockedRetryCooldownHours}h not met — skipped (use --force)\n`,
+      );
+      continue;
+    }
+    if (reopenBlockedTask(cfg.tasksFile, id)) {
+      const tstate = getTaskState(state, id);
+      tstate.attempts = 0;
+      tstate.noChangeAttempts = 0;
+      tstate.blocked = false;
+      reopened.push(id);
+      const age = Number.isFinite(ageMs) ? `blocked ${formatAge(ageMs)} ago` : "no block timestamp";
+      process.stdout.write(`  + #${id} reopened (${age})\n`);
+    }
+  }
+  saveState(cfg.stateFile, state);
+
+  if (reopened.length === 0) {
+    process.stdout.write(
+      "ralphloop: nothing reopened — all blocked tasks are still cooling down (use --force).\n",
+    );
+    return 0;
+  }
+
+  // Base of the integration-review diff: HEAD before the batch runs.
+  const firstSha = await currentHeadSha({ cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs });
+
+  // Rerun the reopened tasks — per-task review is off in retry-blocked mode.
+  const code = await runLoop(cfg);
+
+  // Integration review over the whole batch, on Opus.
+  const headNow = await currentHeadSha({ cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs });
+  if (!firstSha || !headNow || headNow === firstSha) {
+    process.stdout.write("ralphloop: no commits produced — skipping integration review.\n");
+    return code;
+  }
+
+  const log = new Logger({ verbose: cfg.verbose });
+  log.info(`integration review — Opus pass over ${reopened.length} reopened task(s)`);
+  const abortCtl = new AbortController();
+  let activeAgent: AgentProcess | null = null;
+  const onSignal = (): void => {
+    abortCtl.abort(new Error("ralphloop: shutting down"));
+    void activeAgent?.kill("SIGTERM");
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    const outcome = await runIntegrationReview({
+      cfg,
+      firstSha,
+      taskIds: reopened,
+      log,
+      runTests: () => defaultRunTests(cfg, log),
+      abortSignal: abortCtl.signal,
+      registerAgent: (a) => {
+        activeAgent = a;
+      },
+      clearAgent: () => {
+        activeAgent = null;
+      },
+    });
+    if (outcome.kind === "converged") {
+      log.done(`integration review APPROVED after ${outcome.rounds} round(s)`);
+      return code;
+    }
+    log.warn(
+      `integration review did not converge (${outcome.kind}) — ` +
+        `inspect ${cfg.logsDir}`,
+    );
+    return 1;
+  } finally {
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
+}
+
+/** Compact human age for the retry-blocked cooldown report. */
+function formatAge(ms: number): string {
+  const h = ms / 3_600_000;
+  if (h < 1) return `${Math.round(ms / 60_000)}m`;
+  if (h < 48) return `${h.toFixed(1)}h`;
+  return `${Math.round(h / 24)}d`;
 }
 
 /**

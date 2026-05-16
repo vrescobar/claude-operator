@@ -6,8 +6,10 @@ import {
   findNextOpenTask,
   isTaskBlocked,
   isTaskMarkedDone,
+  listBlockedTaskIds,
   markTaskBlocked,
   markTaskDone,
+  reopenBlockedTask,
   revertTaskToPending,
 } from "../src/TaskFile.js";
 
@@ -94,5 +96,38 @@ describe("TaskFile", () => {
   test("isTaskMarkedDone tolerates uppercase X and whitespace variants", () => {
     writeFileSync(path, "- [X]  **42**  Done with capital X\n");
     expect(isTaskMarkedDone(path, "42")).toBe(true);
+  });
+
+  test("listBlockedTaskIds returns blocked ids in file order", () => {
+    writeFileSync(
+      path,
+      [
+        "- [x] **01** done",
+        "- [!] **40** blocked one",
+        "- [ ] **41** open",
+        "- [!] **42** blocked two",
+        "",
+      ].join("\n"),
+    );
+    expect(listBlockedTaskIds(path)).toEqual(["40", "42"]);
+  });
+
+  test("reopenBlockedTask flips [!] back to [ ] and preserves the rest", () => {
+    writeFileSync(
+      path,
+      ["- [!] **40** blocked", "  - sub-bullet survives", "- [ ] **41** untouched", ""].join("\n"),
+    );
+    expect(reopenBlockedTask(path, "40")).toBe(true);
+    const out = readFileSync(path, "utf8");
+    expect(out).toContain("- [ ] **40** blocked");
+    expect(out).toContain("  - sub-bullet survives");
+    expect(out).toContain("- [ ] **41** untouched");
+    expect(isTaskBlocked(path, "40")).toBe(false);
+  });
+
+  test("reopenBlockedTask is a no-op for an unknown or non-blocked id", () => {
+    writeFileSync(path, "- [ ] **40** open\n");
+    expect(reopenBlockedTask(path, "40")).toBe(false);
+    expect(reopenBlockedTask(path, "99")).toBe(false);
   });
 });

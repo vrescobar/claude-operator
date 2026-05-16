@@ -38,6 +38,8 @@ export interface RunFixerOptions {
   registerAgent: (a: AgentProcess) => void;
   clearAgent: () => void;
   agentFactory?: (logStream: Writable) => AgentProcess;
+  /** Extra text appended to the runtime-context block (e.g. the design spec). */
+  extraContext?: string;
 }
 
 export interface FixerOutput {
@@ -49,7 +51,7 @@ export async function runFixer(opts: RunFixerOptions): Promise<FixerOutput> {
 
   const stream = createWriteStream(logFile, { flags: "a" });
   try {
-    const prompt = buildPrompt(cfg, task, round, report, testsOk, testOutput);
+    const prompt = buildPrompt(cfg, task, round, report, testsOk, testOutput, opts.extraContext);
 
     const factory =
       opts.agentFactory ??
@@ -94,6 +96,7 @@ function buildPrompt(
   report: string,
   testsOk: boolean,
   testOutput: string,
+  extraContext?: string,
 ): string {
   const base = readFileSync(PROMPT_FILE, "utf8");
   // Single-pass {{KEY}} substitution: a key's replacement is never re-scanned
@@ -124,6 +127,9 @@ function buildPrompt(
       "─".repeat(72),
       "Sub-loop runtime context (provided by the ralph driver, not by you):",
       `  Task under review: #${task.id} — ${task.title}`,
+      ...(extraContext && extraContext.trim().length > 0
+        ? ["", extraContext.trim()]
+        : []),
       "─".repeat(72),
       "",
     ].join("\n")

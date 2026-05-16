@@ -39,7 +39,7 @@ export interface RalphloopConfigFile {
     taskPrefix?: string;
     reviewPrefix?: string;
   };
-  /** Agent backend: "claude" (default) or "claude-p". */
+  /** Agent backend: "claude-p" (default) or "claude". */
   agentBackend?: string;
   claude?: {
     bin?: string;

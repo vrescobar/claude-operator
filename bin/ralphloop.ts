@@ -48,7 +48,7 @@ Common options (apply to every subcommand):
   --dry-run                 print the next task and exit (no spawn / commit)
   --no-review               disable the reviewer→fixer sub-loop
   --review-max-rounds <N>   override RALPH_REVIEW_MAX_ROUNDS (default 5)
-  --backend <name>          agent backend: claude (default) or claude-p
+  --backend <name>          agent backend: claude-p (default) or claude
   --claude-p                shorthand for --backend claude-p
 
 \`init\` options:
@@ -57,7 +57,7 @@ Common options (apply to every subcommand):
 Selected environment variables (full list: README.md):
   RALPH_CLAUDE_BIN          path to claude CLI (default 'claude')
   RALPH_CLAUDE_P_BIN        path to claude-p CLI (default 'claude-p')
-  RALPH_AGENT_BACKEND       agent backend: claude | claude-p (default 'claude')
+  RALPH_AGENT_BACKEND       agent backend: claude | claude-p (default 'claude-p')
   RALPH_CLAUDE_MODEL        agent model (default 'claude-sonnet-4-6')
   RALPH_REVIEWER_MODEL      reviewer model (default 'claude-opus-4-7')
   RALPH_FIXER_MODEL         fixer model (default 'claude-sonnet-4-6')

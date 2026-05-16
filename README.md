@@ -48,11 +48,12 @@ backends, selected globally:
 
 | Backend    | How it bills            | Select with |
 |------------|-------------------------|-------------|
-| `claude`   | Official Claude Code CLI — API key | default |
-| `claude-p` | [`claude-p`](https://github.com/Equality-Machine/claude-p) wrapper — runs on the Claude **subscription** login | `--claude-p` |
+| `claude-p` | [`claude-p`](https://github.com/Equality-Machine/claude-p) wrapper — runs on the Claude **subscription** login | default |
+| `claude`   | Official Claude Code CLI — API key | `--backend claude` |
 
 ```sh
-bun ./ralphloop/bin/ralphloop.ts run --claude-p          # or --backend claude-p
+bun ./ralphloop/bin/ralphloop.ts run                     # default: claude-p
+bun ./ralphloop/bin/ralphloop.ts run --backend claude    # opt out to the API-key CLI
 ```
 
 Also settable via `agentBackend:` in `config.yaml` or `RALPH_AGENT_BACKEND`.
@@ -72,7 +73,7 @@ report the wrapper's own version).
 **First-run folder trust** — `claude-p` drives the interactive TUI, which shows
 a one-time "trust this folder?" dialog for a directory Claude Code has not seen
 before. Open your repo once in `claude` (interactively) and accept the prompt
-before running ralphloop with `--claude-p`, otherwise the run fails with
+before running ralphloop, otherwise the run fails with
 `workspace_trust_blocked`.
 
 **Cost reporting under `claude-p`** — the interactive TUI does not expose

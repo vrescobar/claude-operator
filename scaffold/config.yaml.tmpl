@@ -15,13 +15,13 @@
 #   taskPrefix: task
 #   reviewPrefix: review
 
-# Agent backend (default: claude)
-#   claude   — official Claude Code CLI (API-key billing)
-#   claude-p — claude-p wrapper, runs on the Claude subscription login.
+# Agent backend (default: claude-p)
+#   claude-p — claude-p wrapper, runs on the Claude subscription login (default).
 #              Install pinned:  uv tool install 'claude-p==0.1.4'
 #              Under claude-p, token usage is recovered from the session
 #              transcript and cost is ESTIMATED from a local price table.
-# agentBackend: claude
+#   claude   — official Claude Code CLI (API-key billing)
+# agentBackend: claude-p
 
 # Claude CLI binary + model (defaults: claude / claude-sonnet-4-6)
 # claude:

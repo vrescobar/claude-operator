@@ -23,11 +23,15 @@ export type AgentBackend = "claude" | "claude-p";
 /** Exact `claude-p` version ralphloop is built and audited against. */
 export const CLAUDE_P_PINNED_VERSION = "0.1.4";
 
-/** Parse a raw backend string (CLI flag / env / config) into a known value. */
+/**
+ * Parse a raw backend string (CLI flag / env / config) into a known value.
+ * The default — unset or unrecognised — is `claude-p`; pass `claude`
+ * explicitly to use the official API-key CLI.
+ */
 export function resolveBackend(raw: string | undefined): AgentBackend {
   const v = (raw ?? "").trim().toLowerCase();
-  if (v === "claude-p" || v === "claudep" || v === "claude_p") return "claude-p";
-  return "claude";
+  if (v === "claude") return "claude";
+  return "claude-p";
 }
 
 export interface BackendInvocation {

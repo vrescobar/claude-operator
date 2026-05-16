@@ -49,8 +49,8 @@ export interface Config {
   commitReviewPrefix: string;
   /**
    * Which CLI drives every agent invocation:
-   *  - `"claude"`   — the official Claude Code CLI (default; API-key billing).
-   *  - `"claude-p"` — the `claude-p` subscription wrapper.
+   *  - `"claude-p"` — the `claude-p` subscription wrapper (default).
+   *  - `"claude"`   — the official Claude Code CLI (API-key billing).
    * Applies globally (main agent + reviewer + fixer). See `AgentBackend.ts`.
    */
   agentBackend: AgentBackend;

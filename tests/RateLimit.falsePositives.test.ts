@@ -43,6 +43,29 @@ describe("RateLimit detector — false-positive guards", () => {
     ].join("\n");
     expect(detectRateLimit(out)).toBeNull();
   });
+
+  test("informational stream-json rate_limit_event (status allowed) is ignored", () => {
+    const out = [
+      '{"type":"system","subtype":"init","model":"claude-sonnet-4-6"}',
+      '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1779123600}}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}',
+    ].join("\n");
+    expect(detectRateLimit(out)).toBeNull();
+  });
+
+  test("rate_limit_event with status allowed_warning is ignored", () => {
+    const out =
+      '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","resetsAt":1779141600}}';
+    expect(detectRateLimit(out)).toBeNull();
+  });
+
+  test("a genuinely rejecting rate_limit_event is still detected", () => {
+    const out =
+      '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1779123600}}';
+    const r = detectRateLimit(out);
+    expect(r).not.toBeNull();
+    expect(r?.until?.getTime()).toBe(1779123600 * 1000);
+  });
 });
 
 describe("AgentProcess — rate-limit gating on exit code", () => {
@@ -77,6 +100,27 @@ describe("AgentProcess — rate-limit gating on exit code", () => {
     });
     const r = await agent.run("");
     expect(r.rateLimit).not.toBeNull();
+  });
+
+  test("rate-limit text + timeout → AgentResult.rateLimit is null", async () => {
+    // A stuck agent that runs out its wall-clock budget must NOT be read as
+    // rate-limited even when its output mentions a limit — otherwise the loop
+    // sleeps for hours instead of handling the timeout.
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake",
+      timeoutMs: 300,
+      killGraceMs: 200,
+      cwd: process.cwd(),
+      env: {
+        FAKE_CLAUDE_OUT: "doing work",
+        FAKE_CLAUDE_RATE_LIMIT: "rate limit exceeded — please slow down",
+        FAKE_CLAUDE_SLEEP: "30",
+      },
+    });
+    const r = await agent.run("");
+    expect(r.timedOut).toBe(true);
+    expect(r.rateLimit).toBeNull();
   });
 });
 

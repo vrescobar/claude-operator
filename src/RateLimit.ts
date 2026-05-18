@@ -82,9 +82,10 @@ const RATE_LIMIT_TAIL_LINES = 200;
 
 /**
  * Run the pattern table against the tail of stdout / stderr. Code blocks
- * (lines fenced by ```) are stripped before scanning so that an agent that
- * writes a markdown explanation of rate-limit handling does not accidentally
- * trigger detection.
+ * (lines fenced by ```) and informational stream-json `rate_limit_event`
+ * lines are stripped before scanning so that an agent that writes a markdown
+ * explanation of rate-limit handling — or a healthy run whose stream carries
+ * a routine quota heads-up — does not accidentally trigger detection.
  *
  * The caller (AgentProcess) is also expected to invoke this only when the
  * process exited non-zero or hit its timeout; a successful agent run can
@@ -135,7 +136,8 @@ export function detectServerError(output: string): ServerErrorInfo | null {
 
 function sanitiseForRateLimitScan(output: string): string {
   const lines = output.split("\n");
-  // 1. Drop content inside fenced code blocks (```...```).
+  // 1. Drop content inside fenced code blocks (```...```) and informational
+  //    stream-json `rate_limit_event` lines (see `isInformationalRateLimitEvent`).
   const stripped: string[] = [];
   let inFence = false;
   for (const line of lines) {
@@ -143,11 +145,31 @@ function sanitiseForRateLimitScan(output: string): string {
       inFence = !inFence;
       continue;
     }
-    if (!inFence) stripped.push(line);
+    if (inFence) continue;
+    if (isInformationalRateLimitEvent(line)) continue;
+    stripped.push(line);
   }
   // 2. Keep only the last N lines.
   const tail = stripped.slice(-RATE_LIMIT_TAIL_LINES);
   return tail.join("\n");
+}
+
+/**
+ * True for a stream-json `rate_limit_event` line that is NOT an actual
+ * rejection. claude emits these routinely as a quota heads-up — `status`
+ * `"allowed"` / `"allowed_warning"` — each carrying a `resetsAt` epoch for
+ * the *next* window boundary. That epoch matches the `reset … <epoch>`
+ * pattern, so an unfiltered scan reads a healthy run as rate-limited and
+ * sleeps until the next window. A genuinely rejecting event (status mentions
+ * reject/block/exceed) is kept, so its `resetsAt` is still honoured.
+ */
+function isInformationalRateLimitEvent(line: string): boolean {
+  const t = line.trim();
+  if (!t.startsWith("{") || !/"type"\s*:\s*"rate_limit_event"/.test(t)) {
+    return false;
+  }
+  const status = /"status"\s*:\s*"([^"]*)"/.exec(t)?.[1] ?? "";
+  return !/reject|block|exceed/i.test(status);
 }
 
 /**

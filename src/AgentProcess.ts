@@ -229,7 +229,12 @@ export class AgentProcess {
     // writing code about rate limits.
     const failed = exitCode !== 0 || timedOut;
     const combinedOutput = `${stdout}\n${stderr}`;
-    const rateLimit = failed ? detectRateLimit(combinedOutput) : null;
+    // A timed-out run consumed its *entire* wall-clock budget — the opposite
+    // of a rate-limit, which makes claude exit fast. Scanning a timeout's
+    // output for rate-limit text mis-reads a long stuck agent (which mentions
+    // or emits "rate limit" telemetry in passing) as rate-limited and then
+    // sleeps for hours. Timeouts are handled by the caller's timeout path.
+    const rateLimit = failed && !timedOut ? detectRateLimit(combinedOutput) : null;
 
     // Pull usage + final assistant text out of the stream-json aggregator.
     // Fallback when no stream-json `result` event was seen: stdout-as-text,

@@ -24,7 +24,7 @@ import { stripAnsi } from "./Logger.js";
 import { estimateCostUsd } from "./Pricing.js";
 import { detectRateLimit, detectServerError } from "./RateLimit.js";
 import { readSessionUsage } from "./SessionUsage.js";
-import type { AgentResult, AgentUsage } from "./types.js";
+import type { AgentResult, AgentUsage, RateLimitInfo } from "./types.js";
 
 export interface AgentProcessOptions {
   /** Path or name of the binary. Default: 'claude'. */
@@ -222,14 +222,8 @@ export class AgentProcess {
     const exitCode = typeof result.exitCode === "number" ? result.exitCode : null;
     const signal = (result.signal as NodeJS.Signals | undefined) ?? null;
 
-    // Only honour a rate-limit signal when the process did NOT exit cleanly.
-    // A successful agent run cannot legitimately be rate-limited; treating
-    // every output that mentions "rate limit" as one is the most common
-    // false-positive when the agent is itself a coding agent reading or
-    // writing code about rate limits.
     const failed = exitCode !== 0 || timedOut;
     const combinedOutput = `${stdout}\n${stderr}`;
-    const rateLimit = failed ? detectRateLimit(combinedOutput) : null;
 
     // Pull usage + final assistant text out of the stream-json aggregator.
     // Fallback when no stream-json `result` event was seen: stdout-as-text,
@@ -237,6 +231,26 @@ export class AgentProcess {
     // text-mode override hit.
     const final = stream.finalize();
     const text = final.text ?? stdout;
+
+    // Rate-limit detection. The structured `rate_limit_event` (a machine
+    // signal claude emits) is authoritative when present — it carries an
+    // explicit `status` and reset time, no guessing.
+    //
+    // Otherwise fall back to a text scan, but ONLY over channels claude
+    // itself controls: its final assistant message and stderr. The raw
+    // stdout stream-json embeds `tool_result` content — arbitrary output of
+    // whatever commands the agent ran — and benign `rate_limit_event`
+    // epochs. Scanning that treats the agent's own output (e.g. a test
+    // suite that prints "reset epoch …") as a rate-limit message: the
+    // false-positive that once stalled the loop for hours. A successful
+    // run is never rate-limited, so the scan is also gated on `failed`.
+    let rateLimit: RateLimitInfo | null = final.rateLimit;
+    if (!rateLimit && failed) {
+      const scanText = final.sawStreamJson
+        ? `${final.text ?? ""}\n${stderr}`
+        : `${stdout}\n${stderr}`;
+      rateLimit = detectRateLimit(scanText);
+    }
 
     let usage = final.usage;
     let costUsd = final.costUsd;
@@ -363,6 +377,7 @@ class StreamJsonAggregator {
   private apiDurationMs: number | null = null;
   private numTurns: number | null = null;
   private isError = false;
+  private rateLimit: RateLimitInfo | null = null;
 
   consume(rawLine: string): string[] {
     const line = rawLine.trim();
@@ -391,6 +406,8 @@ class StreamJsonAggregator {
     apiDurationMs: number | null;
     numTurns: number | null;
     isError: boolean;
+    rateLimit: RateLimitInfo | null;
+    sawStreamJson: boolean;
   } {
     if (!this.sawStreamJson) {
       return {
@@ -400,6 +417,8 @@ class StreamJsonAggregator {
         apiDurationMs: null,
         numTurns: null,
         isError: false,
+        rateLimit: null,
+        sawStreamJson: false,
       };
     }
     return {
@@ -409,6 +428,8 @@ class StreamJsonAggregator {
       apiDurationMs: this.apiDurationMs,
       numTurns: this.numTurns,
       isError: this.isError,
+      rateLimit: this.rateLimit,
+      sawStreamJson: true,
     };
   }
 
@@ -430,6 +451,19 @@ class StreamJsonAggregator {
           const status = (info as { status?: string }).status ?? "?";
           const resets = (info as { resetsAt?: number }).resetsAt;
           const reset = typeof resets === "number" ? new Date(resets * 1000).toISOString() : "?";
+          // `status` is authoritative. "allowed" / "allowed_warning" mean the
+          // request went through — the event is only a quota heads-up, so it
+          // CLEARS any earlier block. Anything else ("rejected", …) is a real
+          // block: capture it with the reset time. claude streams these
+          // continuously, so the last event wins.
+          if (isBlockingRateLimitStatus(status)) {
+            this.rateLimit = {
+              until: typeof resets === "number" ? new Date(resets * 1000) : null,
+              reason: `rate_limit_event status=${status}`,
+            };
+          } else {
+            this.rateLimit = null;
+          }
           return [`[rate-limit] status=${status} resets=${reset}`];
         }
         return ["[rate-limit] (info unavailable)"];
@@ -551,6 +585,18 @@ function isStreamJsonEvent(v: unknown): v is StreamJsonEvent {
 
 function looksLikeJson(line: string): boolean {
   return line.startsWith("{") && line.endsWith("}");
+}
+
+/**
+ * Whether a `rate_limit_event` status string represents an actual block.
+ * Claude streams these events continuously; "allowed" / "allowed_warning"
+ * mean the request was served (quota heads-up only). Anything else — or an
+ * absent status (`"?"`) treated as non-blocking — is a real rejection.
+ */
+const NON_BLOCKING_RATE_LIMIT_STATUSES = new Set(["allowed", "allowed_warning"]);
+function isBlockingRateLimitStatus(status: string): boolean {
+  const s = status.toLowerCase();
+  return s !== "?" && !NON_BLOCKING_RATE_LIMIT_STATUSES.has(s);
 }
 
 function isZeroUsage(u: AgentUsage): boolean {

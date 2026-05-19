@@ -80,6 +80,105 @@ describe("AgentProcess — rate-limit gating on exit code", () => {
   });
 });
 
+describe("AgentProcess — stream-json rate-limit handling", () => {
+  // A benign `rate_limit_event` (status "allowed") carries a `resetsAt`
+  // epoch; a tool_result embeds command output that itself mentions
+  // "reset epoch …". Neither is a real rate-limit. The process exits
+  // non-zero. Before the fix, the raw-stdout scan matched the epoch and
+  // the loop slept for hours. Now: rateLimit must be null.
+  test("benign rate_limit_event + tool_result epoch text + exit 1 → rateLimit null", async () => {
+    const events = [
+      JSON.stringify({ type: "system", subtype: "init", model: "fake" }),
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed", resetsAt: 1779210000 },
+      }),
+      JSON.stringify({
+        type: "user",
+        message: {
+          content: [
+            {
+              type: "tool_result",
+              is_error: false,
+              content: "ralph iteration 7/10 — rate-limit-hits=0 reset epoch 1779210000",
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        subtype: "error",
+        is_error: false,
+        result: "could not finish in time",
+      }),
+    ];
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: events.join("\n"), FAKE_CLAUDE_EXIT: "1" },
+    });
+    const r = await agent.run("");
+    expect(r.exitCode).toBe(1);
+    expect(r.rateLimit).toBeNull();
+  });
+
+  // A genuine block: status "rejected" with a reset time. The structured
+  // signal is authoritative — rateLimit is populated from `resetsAt`.
+  test("rejected rate_limit_event → rateLimit populated from resetsAt", async () => {
+    const events = [
+      JSON.stringify({ type: "system", subtype: "init", model: "fake" }),
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1779210000 },
+      }),
+      JSON.stringify({ type: "result", subtype: "error", is_error: true, result: "blocked" }),
+    ];
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: events.join("\n"), FAKE_CLAUDE_EXIT: "1" },
+    });
+    const r = await agent.run("");
+    expect(r.rateLimit).not.toBeNull();
+    expect(r.rateLimit?.until?.getTime()).toBe(1779210000 * 1000);
+  });
+
+  // A later "allowed" event clears an earlier "rejected" one — the block lifted.
+  test("rejected then allowed rate_limit_event → rateLimit null", async () => {
+    const events = [
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "rejected", resetsAt: 1779210000 },
+      }),
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "allowed", resetsAt: 1779210000 },
+      }),
+      JSON.stringify({ type: "result", subtype: "error", is_error: false, result: "done" }),
+    ];
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: events.join("\n"), FAKE_CLAUDE_EXIT: "1" },
+    });
+    const r = await agent.run("");
+    expect(r.rateLimit).toBeNull();
+  });
+
+  // Defence-in-depth: a raw JSON wire line embedding a `resetsAt` epoch is
+  // dropped by the text-scan sanitiser, so it never false-positives.
+  test("detectRateLimit ignores a raw stream-json line with an epoch", () => {
+    const out = '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1779210000}}';
+    expect(detectRateLimit(out)).toBeNull();
+  });
+});
+
 describe("computeSleepUntil — minSleepMs floor", () => {
   test("past until + zero jitter + zero floor sleeps 0 ms (legacy behaviour)", () => {
     const now = new Date("2026-05-09T12:00:00Z");

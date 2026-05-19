@@ -135,7 +135,10 @@ export function detectServerError(output: string): ServerErrorInfo | null {
 
 function sanitiseForRateLimitScan(output: string): string {
   const lines = output.split("\n");
-  // 1. Drop content inside fenced code blocks (```...```).
+  // 1. Drop content inside fenced code blocks (```...```) and raw stream-json
+  //    wire lines. A single JSON event line can embed megabytes of
+  //    tool-result content and benign `rate_limit_event` epochs; the line
+  //    tail/fence guards are useless against it (it's one line, always last).
   const stripped: string[] = [];
   let inFence = false;
   for (const line of lines) {
@@ -143,7 +146,10 @@ function sanitiseForRateLimitScan(output: string): string {
       inFence = !inFence;
       continue;
     }
-    if (!inFence) stripped.push(line);
+    if (inFence) continue;
+    const t = line.trim();
+    if (t.startsWith("{") && t.endsWith("}")) continue;
+    stripped.push(line);
   }
   // 2. Keep only the last N lines.
   const tail = stripped.slice(-RATE_LIMIT_TAIL_LINES);

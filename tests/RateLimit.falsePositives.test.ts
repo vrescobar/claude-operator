@@ -147,6 +147,31 @@ describe("AgentProcess — stream-json rate-limit handling", () => {
     expect(r.rateLimit?.until?.getTime()).toBe(1779210000 * 1000);
   });
 
+  // claude-p emits `status: "unknown"` when it cannot determine the rate-limit
+  // state (e.g. an unrelated error happened first and the wire payload lacks a
+  // `resetsAt`). Treating that as a block forces a 5-min sleep when the budget
+  // is fine — observed in production on a task whose agent failed with
+  // `[error] unknown` while ralph paused for 5m18s on a phantom rate limit.
+  test("unknown rate_limit_event status → rateLimit null (no spurious sleep)", async () => {
+    const events = [
+      JSON.stringify({ type: "system", subtype: "init", model: "fake" }),
+      JSON.stringify({
+        type: "rate_limit_event",
+        rate_limit_info: { status: "unknown" },
+      }),
+      JSON.stringify({ type: "result", subtype: "error", is_error: true, result: "boom" }),
+    ];
+    const agent = new AgentProcess({
+      command: FAKE_CLAUDE,
+      model: "fake",
+      timeoutMs: 5000,
+      cwd: process.cwd(),
+      env: { FAKE_CLAUDE_OUT: events.join("\n"), FAKE_CLAUDE_EXIT: "1" },
+    });
+    const r = await agent.run("");
+    expect(r.rateLimit).toBeNull();
+  });
+
   // A later "allowed" event clears an earlier "rejected" one — the block lifted.
   test("rejected then allowed rate_limit_event → rateLimit null", async () => {
     const events = [

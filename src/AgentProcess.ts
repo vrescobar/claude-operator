@@ -590,10 +590,18 @@ function looksLikeJson(line: string): boolean {
 /**
  * Whether a `rate_limit_event` status string represents an actual block.
  * Claude streams these events continuously; "allowed" / "allowed_warning"
- * mean the request was served (quota heads-up only). Anything else — or an
- * absent status (`"?"`) treated as non-blocking — is a real rejection.
+ * mean the request was served (quota heads-up only) — never a block.
+ * "unknown" is what claude-p emits when it cannot determine the rate-limit
+ * status (e.g. an unrelated agent error happened first and the wire payload
+ * lacks a `resetsAt`); treating that as a block forces a 5-min sleep when
+ * the budget is fine. An absent status (`"?"`) is also non-blocking.
+ * Anything else ("rejected", …) is a real rejection.
  */
-const NON_BLOCKING_RATE_LIMIT_STATUSES = new Set(["allowed", "allowed_warning"]);
+const NON_BLOCKING_RATE_LIMIT_STATUSES = new Set([
+  "allowed",
+  "allowed_warning",
+  "unknown",
+]);
 function isBlockingRateLimitStatus(status: string): boolean {
   const s = status.toLowerCase();
   return s !== "?" && !NON_BLOCKING_RATE_LIMIT_STATUSES.has(s);

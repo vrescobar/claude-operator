@@ -41,6 +41,35 @@ Or add a script to your consumer `package.json`:
 "scripts": { "ralph": "bun ./ralphloop/bin/ralphloop.ts run" }
 ```
 
+### Background mode (`--nohup`, Linux + systemd-user)
+
+By default `run` is foreground: close the terminal and the loop dies. Pass
+`--nohup` to keep it alive across logouts via a per-project systemd-user
+service (`~/.config/systemd/user/ralphloop-<repo-basename>.service`):
+
+```sh
+bun ./ralphloop/bin/ralphloop.ts run --nohup              # idempotent: start, or status if already running
+bun ./ralphloop/bin/ralphloop.ts run --nohup --status     # state + recent journal lines
+bun ./ralphloop/bin/ralphloop.ts run --nohup --logs 200   # last N journal lines
+bun ./ralphloop/bin/ralphloop.ts run --nohup --restart    # systemctl restart
+bun ./ralphloop/bin/ralphloop.ts run --nohup --cancel     # stop + disable + remove unit
+```
+
+Any `run` flags you pass alongside `--nohup` (e.g. `--max-iterations`,
+`--backend`, `--workspace`) are forwarded into the unit's `ExecStart` so the
+background invocation is the same one you would have run in foreground. The
+ExecStart is regenerated on every start, so changing flags just means
+`--nohup --cancel` followed by `--nohup` with the new flags.
+
+To survive a full logout (not just a closed terminal), enable lingering once:
+
+```sh
+loginctl enable-linger $USER
+```
+
+Requires `systemctl --user` (any modern Linux desktop / server). On hosts
+without systemd user the command exits with code 2 and a clear message.
+
 ## Agent backends
 
 Each agent invocation (main agent, reviewer, fixer) is driven by one of two

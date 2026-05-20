@@ -26,6 +26,7 @@ import { archiveClosedPhases } from "../src/PhaseArchive.js";
 import { runIntegrationReview } from "../src/review/integration.js";
 import { runInit } from "../src/scaffolder.js";
 import { getTaskState, loadState, saveState } from "../src/State.js";
+import * as Systemd from "../src/SystemdManager.js";
 import { listBlockedTaskIds, reopenBlockedTask } from "../src/TaskFile.js";
 import { formatLocal } from "../src/time.js";
 import { resolveWorkspace, type WorkspaceCliFlags } from "../src/workspace.js";
@@ -59,6 +60,15 @@ Common options (apply to every subcommand):
   --backend <name>          agent backend: claude-p (default) or claude
   --claude-p                shorthand for --backend claude-p
 
+\`run --nohup\` options (background mode, systemd user — Linux only):
+  --nohup                   install/start a systemd user service so the loop
+                            survives terminal exit; idempotent (start-or-status)
+  --status                  with --nohup: print service status + recent journal
+  --logs [N]                with --nohup: print last N journal lines (default 50)
+  --cancel                  with --nohup: stop, disable, remove the unit file
+  --restart                 with --nohup: systemctl restart the service
+  Requires systemd user. Survives logout if \`loginctl enable-linger\` is set.
+
 \`retry-blocked\` options:
   --force                   reopen blocked tasks even if still within the
                             cooldown window (RALPH_BLOCKED_RETRY_COOLDOWN_HOURS)
@@ -82,6 +92,8 @@ Selected environment variables (full list: README.md):
 Config precedence: CLI flag > env var > .ralphloop/config.yaml > built-in default.
 `;
 
+type NohupAction = "start-or-status" | "status" | "logs" | "cancel" | "restart";
+
 interface ParsedArgs {
   subcommand: "run" | "retry-blocked" | "init" | "doctor" | "archive" | "help";
   archiveAction?: "ls" | "phases";
@@ -90,6 +102,14 @@ interface ParsedArgs {
   createGoalStub: boolean;
   /** `--force` — reopen blocked tasks despite the cooldown (retry-blocked). */
   force: boolean;
+  /** `--nohup` — manage `run` as a systemd-user background service. */
+  nohup: boolean;
+  /** Which sub-action of `--nohup` to run. */
+  nohupAction: NohupAction;
+  /** `--logs N` — number of journal lines to print under `--nohup --logs`. */
+  nohupLogLines: number;
+  /** Original argv slice (post-subcommand) — forwarded into the unit ExecStart. */
+  rawRunArgs: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -99,6 +119,10 @@ function parseArgs(argv: string[]): ParsedArgs {
     overrides: {},
     createGoalStub: false,
     force: false,
+    nohup: false,
+    nohupAction: "start-or-status",
+    nohupLogLines: 50,
+    rawRunArgs: [],
   };
 
   // Optional leading subcommand
@@ -126,6 +150,11 @@ function parseArgs(argv: string[]): ParsedArgs {
       process.exit(2);
     }
   }
+
+  // Capture the post-subcommand argv slice so we can forward it verbatim into
+  // the systemd unit's ExecStart (minus the --nohup family). Done before
+  // mutation so we keep the user's original ordering.
+  if (out.subcommand === "run") out.rawRunArgs = argv.slice(i);
 
   for (; i < argv.length; i++) {
     const a = argv[i]!;
@@ -196,6 +225,32 @@ function parseArgs(argv: string[]): ParsedArgs {
       case "--force":
         out.force = true;
         break;
+      case "--nohup":
+        out.nohup = true;
+        break;
+      case "--status":
+        out.nohupAction = "status";
+        break;
+      case "--cancel":
+        out.nohupAction = "cancel";
+        break;
+      case "--restart":
+        out.nohupAction = "restart";
+        break;
+      case "--logs": {
+        out.nohupAction = "logs";
+        // --logs takes an optional integer; only consume the next token if it
+        // parses cleanly so `--logs` alone keeps the default count.
+        const peek = argv[i + 1];
+        if (peek !== undefined && /^\d+$/.test(peek)) {
+          const n = Number.parseInt(peek, 10);
+          if (n >= 1) {
+            out.nohupLogLines = n;
+            i++;
+          }
+        }
+        break;
+      }
       default:
         if (a.startsWith("--")) {
           process.stderr.write(`ralphloop: unknown flag '${a}'\n`);
@@ -204,6 +259,41 @@ function parseArgs(argv: string[]): ParsedArgs {
         process.stderr.write(`ralphloop: unexpected positional '${a}'\n`);
         process.exit(2);
     }
+  }
+
+  // Validate --nohup / sub-action combinations.
+  if (!out.nohup && out.nohupAction !== "start-or-status") {
+    process.stderr.write(
+      "ralphloop: --status / --logs / --cancel / --restart require --nohup\n",
+    );
+    process.exit(2);
+  }
+  if (out.nohup && out.subcommand !== "run") {
+    process.stderr.write("ralphloop: --nohup is only valid with the `run` subcommand\n");
+    process.exit(2);
+  }
+  return out;
+}
+
+/**
+ * Strip the --nohup family of flags from the original argv slice. The result
+ * is what gets forwarded to the systemd unit's ExecStart so the background
+ * process runs the same `run` invocation the user typed, minus the bits that
+ * told us to background it.
+ */
+function stripNohupFlags(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--nohup" || a === "--status" || a === "--cancel" || a === "--restart") {
+      continue;
+    }
+    if (a === "--logs") {
+      const peek = args[i + 1];
+      if (peek !== undefined && /^\d+$/.test(peek)) i++;
+      continue;
+    }
+    out.push(a);
   }
   return out;
 }
@@ -219,6 +309,11 @@ async function main(): Promise<void> {
 
   switch (args.subcommand) {
     case "run": {
+      if (args.nohup) {
+        const code = await runNohup(args, workspace.repoRoot);
+        process.exit(code);
+        break;
+      }
       const cfg = loadConfig({ workspace, overrides: args.overrides });
       const code = await runLoop(cfg);
       process.exit(code);
@@ -282,6 +377,151 @@ async function main(): Promise<void> {
       break;
     }
   }
+}
+
+/**
+ * Dispatch the `run --nohup` action against systemd-user. Keeps the loop alive
+ * after the controlling terminal exits by installing a per-project user
+ * service. Idempotent: re-running `--nohup` against an already-active service
+ * prints status + recent logs instead of starting a duplicate.
+ *
+ * Exit codes (deliberately distinct from foreground `run`):
+ *   0 — success (incl. "already running, here's status")
+ *   1 — service is in failed state, or stop/restart failed
+ *   2 — systemd user not available on this host
+ */
+async function runNohup(args: ParsedArgs, repoRoot: string): Promise<number> {
+  if (!(await Systemd.isAvailable())) {
+    process.stderr.write(
+      "ralphloop: systemd user not available on this host — --nohup needs `systemctl --user`\n",
+    );
+    return 2;
+  }
+
+  const serviceName = Systemd.serviceNameFor(repoRoot);
+
+  switch (args.nohupAction) {
+    case "status":
+      return printStatus(serviceName, args.nohupLogLines);
+    case "logs":
+      return printStatus(serviceName, args.nohupLogLines);
+    case "cancel": {
+      const before = await Systemd.isActive(serviceName);
+      const res = await Systemd.stopAndRemove(serviceName);
+      if (!before && !res.removed) {
+        process.stdout.write(
+          `ralphloop: ${serviceName} was not installed — nothing to cancel\n`,
+        );
+        return 0;
+      }
+      process.stdout.write(
+        `ralphloop: ${serviceName} stopped${res.removed ? " and unit file removed" : ""}\n`,
+      );
+      if (res.stderr.trim().length > 0 && /failed/i.test(res.stderr)) {
+        process.stderr.write(res.stderr);
+        return 1;
+      }
+      return 0;
+    }
+    case "restart": {
+      const r = await Systemd.restart(serviceName);
+      if (r.exitCode !== 0) {
+        process.stderr.write(`ralphloop: restart failed (exit ${r.exitCode})\n${r.stderr}`);
+        return 1;
+      }
+      process.stdout.write(`ralphloop: ${serviceName} restarted\n`);
+      await Systemd.delay(800);
+      return printStatus(serviceName, 20);
+    }
+    case "start-or-status": {
+      if (await Systemd.isActive(serviceName)) {
+        process.stdout.write(`ralphloop: ${serviceName} already active — showing status\n`);
+        return printStatus(serviceName, 20);
+      }
+      if (await Systemd.isFailed(serviceName)) {
+        process.stdout.write(
+          `ralphloop: ${serviceName} is in 'failed' state — recent logs follow.\n` +
+            "  Use `--nohup --restart` to retry, or `--nohup --cancel` to remove.\n",
+        );
+        await printStatus(serviceName, 30);
+        return 1;
+      }
+      return startNew(args, repoRoot, serviceName);
+    }
+  }
+}
+
+async function startNew(
+  args: ParsedArgs,
+  repoRoot: string,
+  serviceName: string,
+): Promise<number> {
+  const forwarded = stripNohupFlags(args.rawRunArgs);
+  const bunPath = process.execPath; // we're already running under bun
+  const ralphloopBin = resolve(process.argv[1] ?? "");
+  if (ralphloopBin === "") {
+    process.stderr.write("ralphloop: cannot resolve own bin path for ExecStart\n");
+    return 1;
+  }
+
+  const env: Record<string, string> = {};
+  if (process.env["PATH"]) env["PATH"] = process.env["PATH"];
+  if (process.env["HOME"]) env["HOME"] = process.env["HOME"];
+  // Pass through every RALPH_* override visible in the calling shell, so the
+  // background service sees the same env as a foreground invocation would.
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k.startsWith("RALPH_") && typeof v === "string") env[k] = v;
+  }
+
+  const unitPath = await Systemd.writeUnit(serviceName, {
+    description: `ralphloop runloop for ${repoRoot}`,
+    workingDirectory: repoRoot,
+    execCommand: bunPath,
+    execArgs: [ralphloopBin, "run", ...forwarded],
+    env,
+  });
+
+  const start = await Systemd.enableStart(serviceName);
+  if (start.exitCode !== 0) {
+    process.stderr.write(
+      `ralphloop: enable --now failed (exit ${start.exitCode})\n${start.stderr}`,
+    );
+    await printStatus(serviceName, 20);
+    return 1;
+  }
+
+  // Give systemd a moment to transition into active/failed.
+  await Systemd.delay(1_000);
+  const status = await Systemd.getStatus(serviceName, 20);
+  if (status.failed || (!status.active && status.subState === "dead")) {
+    process.stderr.write(
+      `ralphloop: ${serviceName} failed to start (state=${status.activeState}/${status.subState})\n`,
+    );
+    process.stderr.write("  recent journal:\n");
+    for (const l of status.recentLogs) process.stderr.write(`    ${l}\n`);
+    return 1;
+  }
+
+  process.stdout.write(
+    `ralphloop: ${serviceName} started — state=${status.activeState}/${status.subState}` +
+      (status.mainPid !== null ? ` pid=${status.mainPid}` : "") +
+      "\n",
+  );
+  process.stdout.write(`  unit: ${unitPath}\n`);
+  process.stdout.write(`  logs: journalctl --user -u ${serviceName} -f\n`);
+  return 0;
+}
+
+async function printStatus(serviceName: string, lines: number): Promise<number> {
+  const s = await Systemd.getStatus(serviceName, lines);
+  process.stdout.write(`ralphloop: ${serviceName}\n`);
+  process.stdout.write(`  state:  ${s.activeState} / ${s.subState}\n`);
+  if (s.activeSince) process.stdout.write(`  since:  ${s.activeSince}\n`);
+  if (s.mainPid !== null) process.stdout.write(`  pid:    ${s.mainPid}\n`);
+  process.stdout.write(`  logs (last ${s.recentLogs.length}):\n`);
+  for (const l of s.recentLogs) process.stdout.write(`    ${l}\n`);
+  if (s.failed) return 1;
+  return 0;
 }
 
 function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void {

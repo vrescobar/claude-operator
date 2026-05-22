@@ -84,6 +84,73 @@ export async function currentHeadSha(opts: GitOpsOptions): Promise<string | null
   return sha.length === 40 ? sha : null;
 }
 
+/**
+ * Name of the branch HEAD currently points at, or null when HEAD is detached
+ * (no symbolic ref). Used by the finish-merge step to know which branch the
+ * loop's commits live on.
+ */
+export async function currentBranch(opts: GitOpsOptions): Promise<string | null> {
+  const r = await git(opts, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (r.exitCode !== 0) return null;
+  const name = r.stdout.trim();
+  return name.length > 0 ? name : null;
+}
+
+/** True iff a local branch named `name` exists. */
+export async function localBranchExists(opts: GitOpsOptions, name: string): Promise<boolean> {
+  const r = await git(opts, ["rev-parse", "--verify", "--quiet", `refs/heads/${name}`]);
+  return r.exitCode === 0;
+}
+
+export interface MergeResult {
+  /** True only when the merge actually landed on the target branch. */
+  ok: boolean;
+  /** Set when the step was deliberately a no-op (already on target, etc.). */
+  skipped: boolean;
+  /** Human-readable one-liner for the operator log. */
+  detail: string;
+}
+
+/**
+ * Check out `targetBranch` and merge `sourceBranch` into it with `--no-ff`
+ * (always records a merge commit, so the completed batch is visible as one
+ * group in the target's history). The source branch is left untouched.
+ *
+ * On any failure — checkout fails, or the merge conflicts — the repo is
+ * restored as best-effort: a half-applied merge is `--abort`ed and we check
+ * `sourceBranch` back out so the operator lands back where the loop ran. The
+ * caller surfaces `ok: false` and never proceeds as if the merge succeeded.
+ */
+export async function mergeBranchNoFf(
+  opts: GitOpsOptions,
+  args: { targetBranch: string; sourceBranch: string; message: string },
+): Promise<MergeResult> {
+  const { targetBranch, sourceBranch, message } = args;
+  const co = await git(opts, ["checkout", targetBranch]);
+  if (co.exitCode !== 0) {
+    return {
+      ok: false,
+      skipped: false,
+      detail: `checkout ${targetBranch} failed: ${co.stderr.trim() || co.stdout.trim()}`,
+    };
+  }
+  const merge = await git(opts, ["merge", "--no-ff", "-m", message, sourceBranch]);
+  if (merge.exitCode === 0) {
+    return { ok: true, skipped: false, detail: `merged ${sourceBranch} → ${targetBranch} (--no-ff)` };
+  }
+  // Conflict or other failure: undo the half-merge and return to the work
+  // branch so we never leave the operator stranded mid-merge on the target.
+  await git(opts, ["merge", "--abort"]);
+  await git(opts, ["checkout", sourceBranch]);
+  return {
+    ok: false,
+    skipped: false,
+    detail:
+      `merge ${sourceBranch} → ${targetBranch} failed (aborted, back on ${sourceBranch}): ` +
+      `${merge.stderr.trim() || merge.stdout.trim()}`,
+  };
+}
+
 /** Initialise a repo on `main` if absent. Falls back to a plain `init` on git < 2.28. */
 export async function ensureRepo(opts: GitOpsOptions): Promise<void> {
   if (await isRepo(opts)) return;

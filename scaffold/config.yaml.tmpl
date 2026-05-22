@@ -40,3 +40,18 @@
 # Cooldown (hours) before `ralphloop retry-blocked` will reopen a [!] task
 # that was just blocked. Pass --force to bypass it. Default: 6
 # blockedRetryCooldownHours: 6
+
+# What to do when the run finishes successfully (no [ ] tasks left, or the
+# stop marker is written). Opt-in: by default ralphloop never touches branches
+# and the loop just stays on whatever branch it ran on.
+#   merge: true        — check out targetBranch and merge the work branch into
+#                        it with `--no-ff` (records a merge commit), then stay
+#                        there. Local only (never pushes). The work branch is
+#                        kept. Skips itself when already on targetBranch, when
+#                        HEAD is detached, when targetBranch is missing, or when
+#                        the working tree is dirty.
+#   targetBranch: main — branch to merge into (default: main).
+# Env equivalents: RALPH_FINISH_MERGE=1, RALPH_FINISH_MERGE_TARGET_BRANCH=main
+# finish:
+#   merge: false
+#   targetBranch: main

@@ -65,6 +65,8 @@ function stubConfig(overrides: Partial<Config> = {}): Config {
     reviewMaxNoOpRounds: 1,
     reviewMaxRepeatDiffRounds: 1,
     reviewMaxReviewerFailures: 1,
+    finishMerge: false,
+    finishMergeTargetBranch: "main",
     verbose: false,
     dryRun: false,
     ...overrides,

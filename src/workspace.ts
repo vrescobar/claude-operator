@@ -58,6 +58,16 @@ export interface RalphloopConfigFile {
   };
   /** Auto-archive fully-closed `## Phase N` sections from tasks.md. Default true. */
   autoArchiveClosedPhases?: boolean;
+  /**
+   * What to do with the work branch when the run finishes successfully (all
+   * tasks done / stop marker). Opt-in: defaults to no branch handling at all.
+   */
+  finish?: {
+    /** Merge the work branch back into `targetBranch` (`--no-ff`). Default false. */
+    merge?: boolean;
+    /** Branch to merge into when `merge` is true. Default "main". */
+    targetBranch?: string;
+  };
   /** Hours a `[!]` task must stay blocked before `retry-blocked` reopens it. Default 6. */
   blockedRetryCooldownHours?: number;
 }

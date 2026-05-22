@@ -89,6 +89,8 @@ function setup(): { cfg: Config; root: string } {
     reviewMaxNoOpRounds: 2,
     reviewMaxRepeatDiffRounds: 2,
     reviewMaxReviewerFailures: 2,
+    finishMerge: false,
+    finishMergeTargetBranch: "main",
     verbose: false,
     dryRun: false,
   };

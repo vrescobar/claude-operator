@@ -98,6 +98,8 @@ function setup(opts: SandboxOptions): { cfg: Config; root: string } {
     reviewMaxNoOpRounds: opts.reviewMaxNoOpRounds ?? 2,
     reviewMaxRepeatDiffRounds: opts.reviewMaxRepeatDiffRounds ?? 2,
     reviewMaxReviewerFailures: opts.reviewMaxReviewerFailures ?? 2,
+    finishMerge: false,
+    finishMergeTargetBranch: "main",
     verbose: false,
     dryRun: false,
   };

@@ -571,6 +571,12 @@ function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void
   ok("maxIterations", String(cfg.maxIterations));
   ok("stopMarker", cfg.stopMarker);
   ok("commitPrefixes", `${cfg.commitTaskPrefix}(...) / ${cfg.commitReviewPrefix}(..., round K)`);
+  ok(
+    "finishMerge",
+    cfg.finishMerge
+      ? `on success → merge work branch into '${cfg.finishMergeTargetBranch}' (--no-ff, local)`
+      : "disabled (loop stays on the work branch)",
+  );
 
   const missing = [cfg.goalFile, cfg.tasksFile, cfg.progressFile].filter((f) => !existsSync(f));
   if (missing.length > 0) {

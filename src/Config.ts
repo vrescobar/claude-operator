@@ -194,6 +194,19 @@ export interface Config {
    */
   runMode: "normal" | "retry-blocked";
 
+  /**
+   * When the run finishes successfully (no `[ ]` tasks left, or the stop
+   * marker is written), check out `finishMergeTargetBranch` and merge the
+   * branch the loop ran on into it with `--no-ff`. Opt-in: defaults to false,
+   * so on a generic checkout the loop never touches branches. The merge is
+   * local-only (no push) and skips itself when the loop is already on the
+   * target branch, when HEAD is detached, when the target branch is missing,
+   * or when the working tree is dirty.
+   */
+  finishMerge: boolean;
+  /** Branch the finish-merge step checks out and merges into. Default "main". */
+  finishMergeTargetBranch: string;
+
   /** Stream every claude output line to the console live. */
   verbose: boolean;
   /** Skip claude / tests / commit; only print what would be done. */
@@ -367,6 +380,10 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     reviewMaxNoOpRounds: intEnv("RALPH_REVIEW_MAX_NOOP_ROUNDS", 2, env),
     reviewMaxRepeatDiffRounds: intEnv("RALPH_REVIEW_MAX_REPEAT_DIFF_ROUNDS", 2, env),
     reviewMaxReviewerFailures: intEnv("RALPH_REVIEW_MAX_REVIEWER_FAILURES", 2, env),
+
+    finishMerge: boolEnv("RALPH_FINISH_MERGE", cfgFile.finish?.merge ?? false, env),
+    finishMergeTargetBranch:
+      env["RALPH_FINISH_MERGE_TARGET_BRANCH"] || cfgFile.finish?.targetBranch || "main",
 
     verbose: overrides.verbose ?? false,
     dryRun: overrides.dryRun ?? false,

@@ -27,11 +27,14 @@ import type { Config } from "./Config.js";
 import {
   cleanupFailedAttempt,
   commitTask,
+  currentBranch,
   currentHeadSha,
   detectInProgressOperation,
   ensureIdentity,
   ensureRepo,
   hasChanges,
+  localBranchExists,
+  mergeBranchNoFf,
   resetToSha,
 } from "./GitOps.js";
 import { humanDuration, Logger } from "./Logger.js";
@@ -437,6 +440,12 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
     return exitCodeForResult(runResult, startedCounters, state.counters, runOutcomes);
   } finally {
     persist();
+    // On a clean finish, optionally fold the work branch back into the target
+    // branch so the operator lands on (e.g.) main with the batch merged in,
+    // instead of being left on the work branch. Opt-in via cfg.finishMerge.
+    if (runResult === "complete-empty" || runResult === "complete-marker") {
+      await maybeMergeBackToTarget(cfg, log);
+    }
     printFinalStatus({
       log,
       cfg,
@@ -1082,6 +1091,53 @@ async function dropDirtyTree(ctx: IterationCtx, reason: string): Promise<void> {
     ctx.log.stage("tree.cleanup", `${r.mode} (${r.detail})`);
   } else {
     ctx.log.warn(`tree.cleanup failed (${r.mode}): ${r.detail}`);
+  }
+}
+
+/**
+ * Finish-merge step: after a successful run, fold the branch the loop ran on
+ * back into `cfg.finishMergeTargetBranch` with `--no-ff` and stay there. No-op
+ * unless `cfg.finishMerge` is set. Skips itself (with a logged reason) rather
+ * than failing the run when the merge can't be done safely — already on the
+ * target branch, detached HEAD, missing target, or a dirty tree. Local only:
+ * never pushes. A merge conflict aborts cleanly and leaves the operator back
+ * on the work branch.
+ */
+async function maybeMergeBackToTarget(cfg: Config, log: Logger): Promise<void> {
+  if (!cfg.finishMerge) return;
+  const opts = { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs };
+  const target = cfg.finishMergeTargetBranch;
+
+  const source = await currentBranch(opts);
+  if (source === null) {
+    log.warn(`finish-merge skipped — HEAD is detached; no work branch to merge into '${target}'`);
+    return;
+  }
+  if (source === target) {
+    log.info(`finish-merge skipped — already on '${target}', nothing to merge back`);
+    return;
+  }
+  if (!(await localBranchExists(opts, target))) {
+    log.warn(`finish-merge skipped — target branch '${target}' does not exist`);
+    return;
+  }
+  if (await hasChanges(opts)) {
+    log.warn(
+      `finish-merge skipped — working tree has uncommitted changes; ` +
+        `merge '${source}' into '${target}' by hand`,
+    );
+    return;
+  }
+
+  log.stage("finish.merge", `${source} → ${target} (--no-ff)`);
+  const message =
+    `Merge ralph branch '${source}' into ${target}\n\n` +
+    `All tasks completed by the Ralph autonomous loop.`;
+  const r = await mergeBranchNoFf(opts, { targetBranch: target, sourceBranch: source, message });
+  if (r.ok) {
+    log.done(`finish-merge — ${r.detail}; now on '${target}' (work branch '${source}' kept)`);
+  } else {
+    log.warn(`finish-merge failed — ${r.detail}`);
   }
 }
 

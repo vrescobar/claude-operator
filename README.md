@@ -174,6 +174,42 @@ Or via env: `RALPH_AUTO_ARCHIVE_CLOSED_PHASES=0`.
 Cuts ~40 KB of `[x]` history off the per-iteration context once you have a few
 dozen completed phases.
 
+## Merge back to a base branch on finish
+
+By default ralphloop never touches branches: it commits each task on whatever
+branch it was started on and, when the run finishes, just stays there. If you
+run the loop on a feature branch, the commits are left on that feature branch
+for you to merge yourself.
+
+Opt in to an automatic merge-back so a clean finish lands you on (e.g.) `main`
+with the whole batch folded in:
+
+```yaml
+# .ralphloop/config.yaml
+finish:
+  merge: true
+  targetBranch: main   # default
+```
+
+Or via env: `RALPH_FINISH_MERGE=1` (and `RALPH_FINISH_MERGE_TARGET_BRANCH=main`).
+
+When enabled, after a successful run (no `[ ]` tasks left, or the stop marker is
+written) the loop checks out `targetBranch` and merges the work branch into it
+with `git merge --no-ff` — always recording a merge commit so the batch is one
+visible group in history — then stays on `targetBranch`. The work branch is
+**kept**, and the merge is **local only** (it never pushes; `git push` stays in
+your hands).
+
+The step skips itself, with a logged reason and without failing the run, when:
+
+- the loop is already on `targetBranch` (the commits are already there);
+- `HEAD` is detached (no work branch to merge);
+- `targetBranch` doesn't exist locally;
+- the working tree is dirty (uncommitted changes — merge by hand).
+
+A merge conflict aborts cleanly (`git merge --abort`) and checks the work branch
+back out, so you're never left stranded mid-merge.
+
 ## Timezone
 
 All operator-facing timestamps (iteration headers, rate-limit banners,

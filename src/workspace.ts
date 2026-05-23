@@ -70,6 +70,12 @@ export interface RalphloopConfigFile {
   };
   /** Hours a `[!]` task must stay blocked before `retry-blocked` reopens it. Default 6. */
   blockedRetryCooldownHours?: number;
+  /**
+   * Run `bun run typecheck` before the test gate. Default true.
+   * Set to false when the project's stated gate is `bun test` only and
+   * typecheck is known to surface pre-existing errors unrelated to the task.
+   */
+  typecheckEnabled?: boolean;
 }
 
 export interface WorkspaceResolution {

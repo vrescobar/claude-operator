@@ -351,7 +351,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     ),
     runMode: overrides.runMode ?? "normal",
     agentMaxBufferBytes: intEnv("RALPH_AGENT_MAX_BUFFER_BYTES", 50 * 1024 * 1024, env),
-    typecheckEnabled: boolEnv("RALPH_TYPECHECK_ENABLED", true, env),
+    typecheckEnabled: boolEnv("RALPH_TYPECHECK_ENABLED", cfgFile.typecheckEnabled ?? true, env),
     logRetentionDays: intEnv("RALPH_LOG_RETENTION_DAYS", 14, env),
     progressMaxBytes: intEnv("RALPH_PROGRESS_MAX_BYTES", 64 * 1024, env),
     progressTailKeepBytes: intEnv("RALPH_PROGRESS_TAIL_KEEP_BYTES", 8 * 1024, env),

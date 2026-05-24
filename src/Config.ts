@@ -328,7 +328,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     claudePBin,
     claudeModel: env["RALPH_CLAUDE_MODEL"] || cfgFile.claude?.model || "claude-opus-4-7",
     claudeTimeoutMs:
-      intEnv("RALPH_CLAUDE_TIMEOUT_S", cfgFile.claude?.timeoutS ?? 1800, env) * 1000,
+      intEnv("RALPH_CLAUDE_TIMEOUT_S", cfgFile.claude?.timeoutS ?? 3600, env) * 1000,
     testTimeoutMs: intEnv("RALPH_TEST_TIMEOUT_S", 600, env) * 1000,
     gitTimeoutMs: intEnv("RALPH_GIT_TIMEOUT_S", 60, env) * 1000,
     noChangeRetryLimit: intEnv("RALPH_NO_CHANGE_RETRY_LIMIT", 2, env),

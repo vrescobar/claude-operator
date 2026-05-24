@@ -82,9 +82,9 @@ Selected environment variables (full list: README.md):
   RALPH_CLAUDE_BIN          path to claude CLI (default 'claude')
   RALPH_CLAUDE_P_BIN        path to claude-p CLI (default 'claude-p')
   RALPH_AGENT_BACKEND       agent backend: claude | claude-p (default 'claude-p')
-  RALPH_CLAUDE_MODEL        agent model (default 'claude-sonnet-4-6')
+  RALPH_CLAUDE_MODEL        agent model (default 'claude-opus-4-7')
   RALPH_REVIEWER_MODEL      reviewer model (default 'claude-opus-4-7')
-  RALPH_FIXER_MODEL         fixer model (default 'claude-sonnet-4-6')
+  RALPH_FIXER_MODEL         fixer model (default 'claude-opus-4-7')
   RALPH_WORKSPACE_DIR       same as --workspace
   RALPH_GOAL_FILE           same as --goal
   RALPH_CONFIG_FILE         same as --config
@@ -569,7 +569,6 @@ function runDoctor(cfg: Parameters<typeof runLoop>[0], configPath: string): void
     cfg.reviewEnabled ? `enabled (reviewer=${cfg.reviewerModel}, fixer=${cfg.fixerModel})` : "disabled",
   );
   ok("maxIterations", String(cfg.maxIterations));
-  ok("stopMarker", cfg.stopMarker);
   ok("commitPrefixes", `${cfg.commitTaskPrefix}(...) / ${cfg.commitReviewPrefix}(..., round K)`);
   ok(
     "finishMerge",

@@ -5,10 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `ralphloop` is a project-agnostic autonomous coding loop. It reads a checklist
-(`tasks.md`), spawns a Claude agent per task, runs the consumer's tests, commits
-successful tasks, retries failures, and sleeps through rate-limits — halting when
-the agent writes `TASK_COMPLETE` in `progress.md`. It is consumed by other repos
-as a git submodule; the loop operates on the *consumer's* repo, not its own.
+(`tasks.md`), spawns a Claude agent **per phase** (every `[ ]` task under the
+first open `## Phase …` heading is handed to the agent in one shot), runs the
+consumer's tests once at the end of the phase, runs a single review pass over
+the whole phase, retries failures with a hard-reset rollback, and sleeps through
+rate-limits — halting when no `[ ]` tasks remain anywhere in `tasks.md`. It is
+consumed by other repos as a git submodule; the loop operates on the
+*consumer's* repo, not its own. Every agent call (main, reviewer, fixer)
+defaults to `claude-opus-4-7`.
 
 ## Commands
 
@@ -34,11 +38,17 @@ flags on top. Precedence, highest first: CLI flag > `RALPH_*` env var >
 single source of truth passed through the call tree.
 
 **The loop** — `src/loop.ts` is pure orchestration over small focused helper
-modules. One iteration: pick the first `[ ]` task in `tasks.md`, spawn an agent
-(`AgentProcess`), run tests, and on success commit (`GitOps`) + run the review
-sub-loop. State that must survive a crash/restart lives in `state.json`
-(`src/State.ts`, atomic writes via `src/atomic.ts`): per-task attempt counters,
-the attempt-limit guard, aggregate run counters.
+modules. One iteration drives **one whole phase**: `findOpenPhase` (in
+`TaskFile.ts`) picks the first `## Phase` heading that still has `[ ]` tasks
+and hands every one of them to the agent. The agent is expected to commit
+each task on its own (`task(NN): <title>`); any residual diff the agent left
+behind gets folded into a single `task(<phase-slug>): … — tail` commit by the
+loop. Tests run once at the end of the phase; on failure the loop hard-resets
+to the pre-phase SHA and reverts every checked-off task back to `[ ]`. Review
+sub-loop also runs once per phase, over `originalSha..HEAD`. State that must
+survive a crash/restart lives in `state.json` (`src/State.ts`, atomic writes
+via `src/atomic.ts`): per-phase attempt counters keyed `phase:<heading>`, the
+attempt-limit guard, aggregate run counters.
 
 **Agent backends** — `src/AgentBackend.ts` is the *only* place that knows the
 command line for each backend. `claude-p` (default) drives the interactive TUI
@@ -53,17 +63,21 @@ Claude Code session transcript (`~/.claude/projects/**/<id>.jsonl`) in
 `src/Pricing.ts`. The price table must be kept current; estimated figures are
 shown with a `≈$` / `~$` prefix.
 
-**Review sub-loop** — `src/review/` runs a Reviewer→Fixer cycle after each
-successful task commit, iterating until `verdict === APPROVE && tests pass` or
-rounds exhaust. `retry-blocked` mode instead reopens `[!]` blocked tasks with
-the per-task sub-loop *disabled*, then runs one final Opus integration review
-over the whole batch (`firstSha..HEAD`).
+**Review sub-loop** — `src/review/` runs a Reviewer→Fixer cycle once per
+successful phase (over `originalSha..HEAD`), iterating until
+`verdict === APPROVE && tests pass` or rounds exhaust. The reviewer and fixer
+share the synthetic `TaskRef` the loop builds for the phase (`id` = phase
+slug, `title` = phase heading), so commit messages look like
+`review(<phase-slug>, round K): …`. `retry-blocked` mode reopens `[!]` blocked
+tasks with the per-phase sub-loop *disabled*, then runs one final Opus
+integration review over the whole batch.
 
 **Resilience** — transient API 5xx errors are retried with backoff *without*
-consuming a task's attempt budget (`src/RateLimit.ts`, `ServerError` handling).
-A task that exhausts its attempt limit becomes `[!]` blocked and is skipped by
-future `run`s. `src/PhaseArchive.ts` moves fully-completed `## Phase N` sections
-out of `tasks.md` to keep per-iteration context small.
+consuming a phase's attempt budget (`src/RateLimit.ts`, `ServerError`
+handling). A phase that exhausts its attempt limit blocks every remaining
+`[ ]` task in it (flips to `[!]`) and is skipped by future `run`s.
+`src/PhaseArchive.ts` moves fully-completed `## Phase N` sections out of
+`tasks.md` to keep per-iteration context small.
 
 **Time** — operator-facing output renders in host-local time (`src/time.ts`);
 canonical state files (`state.json`, `metrics.jsonl`, log filenames) always use

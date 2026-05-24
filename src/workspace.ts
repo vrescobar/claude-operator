@@ -34,7 +34,6 @@ export interface RalphloopConfigFile {
   workspace?: string;
   repoRoot?: string;
   maxIterations?: number;
-  stopMarker?: string;
   commit?: {
     taskPrefix?: string;
     reviewPrefix?: string;

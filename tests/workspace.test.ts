@@ -68,7 +68,6 @@ describe("resolveWorkspace", () => {
       [
         "goal: my-spec.md",
         "maxIterations: 7",
-        "stopMarker: ALL_DONE",
         "commit:",
         "  taskPrefix: feat",
         "  reviewPrefix: chore",
@@ -80,7 +79,6 @@ describe("resolveWorkspace", () => {
     const r = resolveWorkspace({ cwd, envVars: {}, cliFlags: {} });
     expect(r.configData?.goal).toBe("my-spec.md");
     expect(r.configData?.maxIterations).toBe(7);
-    expect(r.configData?.stopMarker).toBe("ALL_DONE");
     expect(r.configData?.commit?.taskPrefix).toBe("feat");
     expect(r.configData?.commit?.reviewPrefix).toBe("chore");
     expect(r.configData?.claude?.bin).toBe("anthropic");

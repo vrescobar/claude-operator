@@ -1,8 +1,7 @@
 # progress
 
 Append-only decision log. The agent writes one short bullet per task here
-under "Notes per task". When every task is checked off, the agent writes the
-literal `TASK_COMPLETE` on a line by itself at the bottom of this file and
-the loop halts.
+under "Notes per task". The loop halts on its own when every phase in
+`tasks.md` has zero `[ ]` tasks left — no halt marker is required.
 
 ## Notes per task

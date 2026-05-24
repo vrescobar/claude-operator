@@ -12,7 +12,6 @@
  *   {{PROGRESS_FILE}}       path of cfg.progressFile relative to repoRoot
  *   {{WORKSPACE_DIR}}       path of cfg.workspaceDir relative to repoRoot
  *   {{LOGS_DIR}}            path of cfg.logsDir relative to repoRoot
- *   {{STOP_MARKER}}         cfg.stopMarker
  *   {{COMMIT_TASK_PREFIX}}  cfg.commitTaskPrefix
  *
  * Unknown placeholders are left intact (so prompts can use literal `{{...}}`
@@ -65,7 +64,6 @@ export function templateVarsForConfig(cfg: Config): Record<string, string> {
     PROGRESS_FILE: rel(cfg.progressFile),
     WORKSPACE_DIR: rel(cfg.workspaceDir),
     LOGS_DIR: rel(cfg.logsDir),
-    STOP_MARKER: cfg.stopMarker,
     COMMIT_TASK_PREFIX: cfg.commitTaskPrefix,
   };
 }

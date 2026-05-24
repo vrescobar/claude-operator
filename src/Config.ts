@@ -41,8 +41,6 @@ export interface Config {
 
   /** Hard cap on iterations (default 50). */
   maxIterations: number;
-  /** Stop marker matched anchored against progress.md (default "TASK_COMPLETE"). */
-  stopMarker: string;
   /** Commit-message prefix for successful task commits (default "task"). */
   commitTaskPrefix: string;
   /** Commit-message prefix for review-round commits (default "review"). */
@@ -322,14 +320,13 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
 
     maxIterations,
-    stopMarker: env["RALPH_STOP_MARKER"] || cfgFile.stopMarker || "TASK_COMPLETE",
     commitTaskPrefix: env["RALPH_COMMIT_TASK_PREFIX"] || cfgFile.commit?.taskPrefix || "task",
     commitReviewPrefix:
       env["RALPH_COMMIT_REVIEW_PREFIX"] || cfgFile.commit?.reviewPrefix || "review",
     agentBackend,
     claudeBin,
     claudePBin,
-    claudeModel: env["RALPH_CLAUDE_MODEL"] || cfgFile.claude?.model || "claude-sonnet-4-6",
+    claudeModel: env["RALPH_CLAUDE_MODEL"] || cfgFile.claude?.model || "claude-opus-4-7",
     claudeTimeoutMs:
       intEnv("RALPH_CLAUDE_TIMEOUT_S", cfgFile.claude?.timeoutS ?? 1800, env) * 1000,
     testTimeoutMs: intEnv("RALPH_TEST_TIMEOUT_S", 600, env) * 1000,
@@ -369,7 +366,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): Config {
       env["RALPH_REVIEWER_MODEL"] || cfgFile.review?.reviewerModel || "claude-opus-4-7",
     reviewerTimeoutMs: intEnv("RALPH_REVIEWER_TIMEOUT_S", 600, env) * 1000,
     fixerBin: env["RALPH_FIXER_BIN"] || cfgFile.review?.fixerBin || claudeBin,
-    fixerModel: env["RALPH_FIXER_MODEL"] || cfgFile.review?.fixerModel || "claude-sonnet-4-6",
+    fixerModel: env["RALPH_FIXER_MODEL"] || cfgFile.review?.fixerModel || "claude-opus-4-7",
     fixerTimeoutMs: intEnv("RALPH_FIXER_TIMEOUT_S", 600, env) * 1000,
     reviewMaxRounds:
       overrides.reviewMaxRounds ??

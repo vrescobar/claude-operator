@@ -51,7 +51,6 @@ function setup(): { cfg: Config; root: string } {
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 10,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -107,7 +106,7 @@ describe("ralph loop — attempt limit", () => {
     root = s.root;
   });
 
-  test("a task that always fails gets blocked after taskAttemptLimit attempts", async () => {
+  test("a phase that always fails gets its tasks blocked after taskAttemptLimit attempts", async () => {
     let agentCalls = 0;
     const code = await runLoop(cfg, {
       agentFactory: () => {
@@ -123,27 +122,30 @@ describe("ralph loop — attempt limit", () => {
       runTests: async () => ({ ok: true, durationMs: 0, summary: "stub", output: "" }),
     });
 
-    // Loop ran out of iterations after handling task 77 + reaching 78.
+    // Loop exits cleanly: the single phase exceeds its attempt budget and the
+    // loop blocks every remaining task at once, then finds no open phases.
     expect([0, 1]).toContain(code);
 
-    // Both tasks always fail, so each is attempted up to taskAttemptLimit (3)
-    // times before being blocked. Total agent spawns must not exceed 2 ×
-    // taskAttemptLimit; the iteration cap (10) is a safety net we should not hit.
-    expect(agentCalls).toBeLessThanOrEqual(2 * cfg.taskAttemptLimit);
-    expect(agentCalls).toBeGreaterThan(cfg.taskAttemptLimit);
+    // Phase-level retry: ONE phase containing both tasks, attempted up to
+    // taskAttemptLimit (3) times — never more. The iteration cap (10) is a
+    // safety net we must not hit.
+    expect(agentCalls).toBe(cfg.taskAttemptLimit);
 
-    // Task 77 must be marked [!] in tasks.md and isTaskBlocked must agree.
+    // Both tasks in the phase must be marked [!] in tasks.md.
     const after = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
     expect(after).toContain("- [!] **77** Always-fails task");
+    expect(after).toContain("- [!] **78** Reachable after #77 is blocked");
 
-    // Progress note must record the block.
+    // Progress note must record the phase block.
     const progress = readFileSync(resolve(root, ".ralphloop/progress.md"), "utf8");
-    expect(progress).toContain("task #77 blocked");
+    expect(progress).toContain("Phase X blocked");
 
-    // Persistent state should reflect attempts >= limit and blocked=true.
+    // Persistent state should record the phase entry under its phase key.
     const state = JSON.parse(readFileSync(resolve(root, ".ralphloop/state.json"), "utf8"));
-    expect(state.tasks["77"].attempts).toBeGreaterThanOrEqual(cfg.taskAttemptLimit);
-    expect(state.tasks["77"].blocked).toBe(true);
-    expect(state.counters.blocked).toBeGreaterThanOrEqual(1);
+    const phaseEntry = state.tasks["phase:## Phase X"];
+    expect(phaseEntry).toBeDefined();
+    expect(phaseEntry.attempts).toBeGreaterThanOrEqual(cfg.taskAttemptLimit);
+    expect(phaseEntry.blocked).toBe(true);
+    expect(state.counters.blocked).toBeGreaterThanOrEqual(2);
   });
 });

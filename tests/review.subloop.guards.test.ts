@@ -60,7 +60,6 @@ function setup(opts: SandboxOptions): { cfg: Config; root: string } {
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 2,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",

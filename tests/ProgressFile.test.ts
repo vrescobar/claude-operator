@@ -2,7 +2,7 @@ import { describe, test, expect } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
-import { hasTaskComplete, rotateProgressIfTooLarge } from "../src/ProgressFile.js";
+import { rotateProgressIfTooLarge } from "../src/ProgressFile.js";
 
 function withFile(content: string): string {
   const dir = mkdtempSync(resolve(tmpdir(), "ralph-progress-"));
@@ -10,40 +10,6 @@ function withFile(content: string): string {
   writeFileSync(p, content);
   return p;
 }
-
-describe("ProgressFile.hasTaskComplete", () => {
-  test("anchored line at end of file matches", () => {
-    expect(hasTaskComplete(withFile("notes\n\nTASK_COMPLETE\n"))).toBe(true);
-  });
-
-  test("leading/trailing whitespace allowed", () => {
-    expect(hasTaskComplete(withFile("   TASK_COMPLETE  \n"))).toBe(true);
-  });
-
-  test("marker inline in prose does NOT match", () => {
-    expect(
-      hasTaskComplete(
-        withFile("we will write TASK_COMPLETE when everything is done.\n"),
-      ),
-    ).toBe(false);
-  });
-
-  test("marker inside an indented code block (still on its own line) DOES match", () => {
-    // The bash grep is `^[[:space:]]*TASK_COMPLETE[[:space:]]*$`, which we
-    // mirror — indentation inside a fenced code block still counts. Documenting
-    // the behaviour explicitly so future changes are intentional.
-    expect(hasTaskComplete(withFile("```\n    TASK_COMPLETE\n```\n"))).toBe(true);
-  });
-
-  test("returns false on missing file", () => {
-    expect(hasTaskComplete("/no/such/file.md")).toBe(false);
-  });
-
-  test("custom marker is honoured", () => {
-    expect(hasTaskComplete(withFile("ALL_DONE\n"), "ALL_DONE")).toBe(true);
-    expect(hasTaskComplete(withFile("TASK_COMPLETE\n"), "ALL_DONE")).toBe(false);
-  });
-});
 
 describe("ProgressFile.rotateProgressIfTooLarge", () => {
   test("no-op when file is below the threshold", () => {

@@ -53,7 +53,6 @@ function setupSandbox(): { cfg: Config; root: string } {
     // 2 iterations: one to commit the single task, the next to notice the
     // task list is empty and exit 0 cleanly.
     maxIterations: 2,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -143,9 +142,11 @@ describe("ralph loop (smoke)", () => {
     const tasksAfter = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
     expect(tasksAfter).toContain("- [x] **77**");
 
-    // A commit was created
+    // A phase-level tail commit was created. The agent stub does not commit
+    // per-task itself, so the loop folds the residual diff into one phase
+    // commit named after the phase slug.
     const log = execaSync("git", ["log", "--oneline"], { cwd: root });
-    expect(log.stdout).toContain("task(77): Smoke test task");
+    expect(log.stdout).toContain("task(phase-x):");
   });
 
   test("agent failure: non-zero exit retries the same task", async () => {
@@ -211,16 +212,6 @@ describe("ralph loop (smoke)", () => {
     expect(code).toBe(0);
     // Should NOT take the fallback hour.
     expect(took).toBeLessThan(60_000);
-  });
-
-  test("stop marker present at start exits 0 immediately", async () => {
-    writeFileSync(resolve(root, ".ralphloop/progress.md"), "TASK_COMPLETE\n");
-    const code = await runLoop(cfg, {
-      agentFactory: () => {
-        throw new Error("must not spawn agent");
-      },
-    });
-    expect(code).toBe(0);
   });
 
   test("no open tasks exits 0 immediately", async () => {

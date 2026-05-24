@@ -79,7 +79,6 @@ function setupSandbox(maxIterations: number): Sandbox {
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -212,8 +211,8 @@ describe("review sub-loop divergence recovery", () => {
       // initial commit. Otherwise the operator would be stuck with broken
       // commits in their branch.
       const log = execaSync("git", ["log", "--oneline"], { cwd: root });
-      expect(log.stdout).not.toContain("task(77):");
-      expect(log.stdout).not.toContain("review(77,");
+      expect(log.stdout).not.toContain("task(phase-x):");
+      expect(log.stdout).not.toContain("review(phase-x,");
       expect(log.stdout).toContain("init");
 
       // Task is back to `[ ]` so a future ralph run picks it up again.
@@ -265,7 +264,7 @@ describe("review sub-loop divergence recovery", () => {
       expect(code).toBe(0);
 
       const log = execaSync("git", ["log", "--oneline"], { cwd: root });
-      expect(log.stdout).toContain("task(77):");
+      expect(log.stdout).toContain("task(phase-x):");
     });
   });
 });

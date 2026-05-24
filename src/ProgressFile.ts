@@ -1,35 +1,15 @@
 /**
  * Helpers for `ralph/progress.md`.
  *
- * The agent writes `TASK_COMPLETE` on its own line at the bottom of this
- * file when the entire phase is done. Detection must be anchored — the
- * marker can also appear in prose, code blocks and commit-message context
- * elsewhere in the file, and we must NOT halt on those false positives.
+ * The loop no longer reads progress.md for any control-flow signal — the file
+ * is purely the agent's append-only notebook. These helpers exist solely to
+ * keep the file from growing unbounded across runs.
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { atomicWriteFileSync } from "./atomic.js";
 import { formatLocal, localFileStamp } from "./time.js";
-
-/**
- * Returns true iff the file contains a line whose only content (modulo
- * surrounding whitespace) is the stop marker.
- */
-export function hasTaskComplete(
-  path: string,
-  marker = "TASK_COMPLETE",
-): boolean {
-  if (!existsSync(path)) return false;
-  const content = readFileSync(path, "utf8");
-  // Mirrors the grep -E '^[[:space:]]*MARKER[[:space:]]*$' from loop.sh.
-  const re = new RegExp(`^\\s*${escapeRe(marker)}\\s*$`, "m");
-  return re.test(content);
-}
-
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 /**
  * Rotate `progress.md` when it grows beyond `maxBytes`. The current file is

@@ -51,7 +51,6 @@ function setup(failResetMode: "stash" | "reset" | "leave"): { cfg: Config; root:
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 1,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -118,8 +117,15 @@ function makeAgent(root: string) {
   };
 }
 
-describe("working-tree drift cleanup", () => {
-  test("failResetMode=stash: tests-failed → working tree clean for next iteration", async () => {
+describe("phase rollback on test failure", () => {
+  // Under the phase loop, a tests-failed outcome always hard-resets HEAD back
+  // to the pre-phase SHA — that already discards the tail commit + every file
+  // the agent produced, regardless of failResetMode. The follow-up
+  // cleanupFailedAttempt call only matters for any residual stragglers; in
+  // these fixtures there are none, so all three modes converge on the same
+  // clean-tree behaviour.
+
+  test("failResetMode=stash: tests-failed → working tree clean and task reverted", async () => {
     const { cfg, root } = setup("stash");
     const code = await runLoop(cfg, {
       agentFactory: makeAgent(root),
@@ -128,22 +134,18 @@ describe("working-tree drift cleanup", () => {
     // Hit max iterations after the failed iteration → exit 1.
     expect(code).toBe(1);
 
-    // Working tree must be clean afterwards (file was stashed).
+    // Working tree must be clean afterwards (rollback hard-reset).
     const status = execaSync("git", ["status", "--porcelain"], { cwd: root }).stdout;
     expect(status.trim()).toBe("");
 
-    // The stashed change must still be retrievable.
-    const stash = execaSync("git", ["stash", "list"], { cwd: root }).stdout;
-    expect(stash).toContain("ralph-fail/tests-failed/task-77");
-
-    // Tasks.md must show the task reverted to [ ].
+    // Tasks.md must show the task reverted to [ ] so the next run picks it up.
     const tasks = readFileSync(resolve(root, ".ralphloop/tasks.md"), "utf8");
     expect(tasks).toContain("- [ ] **77**");
-    // drift.ts should NOT be present in the working tree (it's in the stash).
+    // The drift file is gone with the rolled-back commit.
     expect(existsSync(resolve(root, "drift.ts"))).toBe(false);
   });
 
-  test("failResetMode=reset: tests-failed → working tree hard-reset", async () => {
+  test("failResetMode=reset: tests-failed → working tree clean and task reverted", async () => {
     const { cfg, root } = setup("reset");
     const code = await runLoop(cfg, {
       agentFactory: makeAgent(root),
@@ -153,17 +155,18 @@ describe("working-tree drift cleanup", () => {
     const status = execaSync("git", ["status", "--porcelain"], { cwd: root }).stdout;
     expect(status.trim()).toBe("");
     expect(existsSync(resolve(root, "drift.ts"))).toBe(false);
-    // No stash created in this mode.
     const stash = execaSync("git", ["stash", "list"], { cwd: root }).stdout;
     expect(stash.trim()).toBe("");
   });
 
-  test("failResetMode=leave: tests-failed → working tree retains the drift (legacy)", async () => {
+  test("failResetMode=leave: rollback still resets HEAD, no stash is created", async () => {
     const { cfg, root } = setup("leave");
     await runLoop(cfg, {
       agentFactory: makeAgent(root),
       runTests: async () => ({ ok: false, durationMs: 5, summary: "stub-fail", output: "" }),
     });
-    expect(existsSync(resolve(root, "drift.ts"))).toBe(true);
+    // Phase rollback removed the tail commit, so the file is gone even when
+    // the legacy "leave" mode would otherwise have preserved it.
+    expect(existsSync(resolve(root, "drift.ts"))).toBe(false);
   });
 });

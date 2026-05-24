@@ -73,7 +73,6 @@ function setupSandbox(): { cfg: Config; root: string } {
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 2,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -163,7 +162,7 @@ describe("finish-merge", () => {
     expect(currentBranch(root)).toBe("work");
     // main has only the init commit (no merge happened).
     const mainLog = execaSync("git", ["log", "--oneline", "main"], { cwd: root });
-    expect(mainLog.stdout).not.toContain("task(77)");
+    expect(mainLog.stdout).not.toContain("task(phase-x)");
   });
 
   test("enabled: merges work into main with --no-ff and leaves us on main", async () => {
@@ -179,7 +178,7 @@ describe("finish-merge", () => {
     expect(currentBranch(root)).toBe("main");
     // main now contains the task commit AND a merge commit.
     const mainLog = execaSync("git", ["log", "--oneline", "main"], { cwd: root });
-    expect(mainLog.stdout).toContain("task(77)");
+    expect(mainLog.stdout).toContain("task(phase-x)");
     expect(mainLog.stdout).toMatch(/Merge ralph branch 'work' into main/);
     // --no-ff always records a merge commit (2 parents).
     const head = execaSync("git", ["rev-list", "--parents", "-n", "1", "HEAD"], { cwd: root });
@@ -203,7 +202,7 @@ describe("finish-merge", () => {
     expect(currentBranch(root)).toBe("main");
     const mainLog = execaSync("git", ["log", "--oneline", "main"], { cwd: root });
     // The task was committed directly on main; there must be no merge commit.
-    expect(mainLog.stdout).toContain("task(77)");
+    expect(mainLog.stdout).toContain("task(phase-x)");
     expect(mainLog.stdout).not.toMatch(/Merge ralph branch/);
   });
 

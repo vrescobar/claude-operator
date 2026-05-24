@@ -40,7 +40,7 @@ import {
 import { humanDuration, Logger } from "./Logger.js";
 import { Lockfile, LockfileBusyError } from "./Lockfile.js";
 import { archiveClosedPhases } from "./PhaseArchive.js";
-import { hasTaskComplete, rotateProgressIfTooLarge } from "./ProgressFile.js";
+import { rotateProgressIfTooLarge } from "./ProgressFile.js";
 import { loadIterationPrompt } from "./promptTemplate.js";
 import { computeSleepUntil, sleepUntil } from "./RateLimit.js";
 import { runReviewSubloop } from "./review/subloop.js";
@@ -49,11 +49,11 @@ import type { RunReviewerOptions } from "./review/Reviewer.js";
 import { getTaskState, loadState, saveState, type AggregateCounters, type LoopState } from "./State.js";
 import {
   countOpenTasks,
-  findNextOpenTask,
-  isTaskMarkedDone,
+  findOpenPhase,
   listBlockedTaskIds,
-  markTaskBlocked,
-  revertTaskToPending,
+  markTasksBlocked,
+  revertTasksToPending,
+  type PhaseRef,
 } from "./TaskFile.js";
 import { formatLocal as formatLocalTs } from "./time.js";
 import { addUsage, emptyUsage, type AgentResult, type AgentUsage, type IterationOutcome, type TaskRef, type TestRunResult } from "./types.js";
@@ -243,58 +243,58 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       log.iterationHeader(iter, cfg.maxIterations);
       state.counters.iterations++;
 
-      if (hasTaskComplete(cfg.progressFile, cfg.stopMarker)) {
-        log.info(`stop marker '${cfg.stopMarker}' present — halting`);
-        persist();
-        runResult = "complete-marker";
-        return 0;
-      }
-
-      const task = findNextOpenTask(cfg.tasksFile);
-      if (!task) {
+      const phase = findOpenPhase(cfg.tasksFile);
+      if (!phase) {
         log.info("no [ ] tasks remaining — done");
         persist();
         runResult = "complete-empty";
         return 0;
       }
 
-      // Reset the RL streak when we move to a different task — the
-      // exponential backoff is per-task, not per-loop.
-      if (rlStreakTaskId !== task.id) {
-        rlStreakTaskId = task.id;
+      const phaseKey = phaseStateKey(phase);
+
+      // Reset the RL streak when we move to a different phase — the
+      // exponential backoff is per-phase, not per-loop.
+      if (rlStreakTaskId !== phaseKey) {
+        rlStreakTaskId = phaseKey;
         rlStreak = 0;
         seStreak = 0;
       }
 
-      const taskState = getTaskState(state, task.id);
+      const phaseState = getTaskState(state, phaseKey);
 
-      if (taskState.attempts >= cfg.taskAttemptLimit) {
-        const lastDisplay = taskState.lastAttemptAt
-          ? formatLocalTs(new Date(taskState.lastAttemptAt))
+      if (phaseState.attempts >= cfg.taskAttemptLimit) {
+        const lastDisplay = phaseState.lastAttemptAt
+          ? formatLocalTs(new Date(phaseState.lastAttemptAt))
           : "unknown";
         const reason =
-          `attempt limit ${cfg.taskAttemptLimit} reached — moving on. ` +
-          `Latest attempt at ${lastDisplay}.`;
-        log.error(`task #${task.id} blocked — ${reason}`);
-        markTaskBlocked(cfg.tasksFile, task.id);
+          `attempt limit ${cfg.taskAttemptLimit} reached — blocking remaining ` +
+          `tasks in this phase and moving on. Latest attempt at ${lastDisplay}.`;
+        const ids = phase.tasks.map((t) => t.id);
+        log.error(`${phaseLabel(phase)} blocked — ${reason}`);
+        markTasksBlocked(cfg.tasksFile, ids);
         appendProgressNote(
           cfg.progressFile,
-          `- task #${task.id} blocked: ${reason}`,
+          `- ${phaseLabel(phase)} blocked: ${ids.length} task(s) flipped to [!] — ${reason}`,
         );
-        taskState.blocked = true;
-        taskState.blockedAt = new Date().toISOString();
-        taskState.timesBlocked++;
-        state.counters.blocked++;
+        phaseState.blocked = true;
+        phaseState.blockedAt = new Date().toISOString();
+        phaseState.timesBlocked++;
+        state.counters.blocked += ids.length;
         persist();
         continue;
       }
 
-      const attempt = taskState.attempts + 1;
-      const logFile = openIterationLogFilePath(cfg.logsDir, task.id, attempt);
+      const attempt = phaseState.attempts + 1;
+      const logFile = openIterationLogFilePath(cfg.logsDir, phaseSlug(phase), attempt);
 
       const remainingOpen = safeCountOpenTasks(cfg.tasksFile);
       const remainingNote = remainingOpen >= 1 ? `  (${remainingOpen} pending)` : "";
-      log.detail("task", `#${task.id} — ${task.title}${remainingNote}`);
+      log.detail(
+        "phase",
+        `${phaseLabel(phase)} — ${phase.tasks.length} open task(s)${remainingNote}`,
+      );
+      log.detail("tasks", phase.tasks.map((t) => `#${t.id}`).join(", "));
       log.detail("attempt", `#${attempt}`);
       log.detail("model", cfg.claudeModel);
       log.detail("log", relativePath(cfg.repoRoot, logFile));
@@ -313,20 +313,21 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
         return 0;
       }
 
-      taskState.attempts = attempt;
-      taskState.lastAttemptAt = new Date().toISOString();
+      phaseState.attempts = attempt;
+      phaseState.lastAttemptAt = new Date().toISOString();
       persist();
       const iterStartedAt = Date.now();
 
       // Next consecutive RL hit number for THIS iteration's agent call —
-      // 1 on first hit for the task, 2 on the second, etc. Used inside
+      // 1 on first hit for the phase, 2 on the second, etc. Used inside
       // `runIteration` to grow the no-reset-time fallback.
       const nextRlHitNumber = rlStreak + 1;
       const nextSeHitNumber = seStreak + 1;
 
       const iterResult = await runIteration({
         cfg,
-        task,
+        phase,
+        phaseKey,
         attempt,
         logFile,
         log,
@@ -353,10 +354,10 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       else seStreak = 0;
 
       // Infrastructure failures (rate-limit, transient 5xx) are not the
-      // task's fault — refund the attempt pre-charged before runIteration so a
-      // provider outage can never exhaust a task's attempt budget.
+      // phase's fault — refund the attempt pre-charged before runIteration so
+      // a provider outage can never exhaust a phase's attempt budget.
       if (outcome === "rate-limited" || outcome === "server-error") {
-        taskState.attempts = Math.max(0, attempt - 1);
+        phaseState.attempts = Math.max(0, attempt - 1);
       }
 
       runOutcomes.push(outcome);
@@ -380,7 +381,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       const costEstimated = iterResult.agent.costEstimated;
       appendMetric(cfg.metricsFile, {
         iteration: iter,
-        taskId: task.id,
+        taskId: phaseSlug(phase),
         attempt,
         outcome,
         durationMs: iterDurationMs,
@@ -414,21 +415,17 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
       if (outcome === "server-error" && seStreak >= cfg.serverErrorMaxConsecutive) {
         log.error(
           `${seStreak} consecutive API server errors — halting run. ` +
-            `Task #${task.id} stays open ([ ]); re-run later to resume.`,
+            `${phaseLabel(phase)} stays open; re-run later to resume.`,
         );
         appendProgressNote(
           cfg.progressFile,
           `- run halted after ${seStreak} consecutive API server errors — ` +
-            `task #${task.id} left open for a later run`,
+            `${phaseLabel(phase)} left open for a later run`,
         );
         runResult = "halted-server-errors";
         return exitCodeForResult(runResult, startedCounters, state.counters, runOutcomes);
       }
 
-      if (outcome === "stop-marker") {
-        runResult = "complete-marker";
-        return 0;
-      }
       if (outcome === "no-tasks") {
         runResult = "complete-empty";
         return 0;
@@ -443,7 +440,7 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
     // On a clean finish, optionally fold the work branch back into the target
     // branch so the operator lands on (e.g.) main with the batch merged in,
     // instead of being left on the work branch. Opt-in via cfg.finishMerge.
-    if (runResult === "complete-empty" || runResult === "complete-marker") {
+    if (runResult === "complete-empty") {
       await maybeMergeBackToTarget(cfg, log);
     }
     printFinalStatus({
@@ -466,11 +463,11 @@ export async function runLoop(cfg: Config, hooks: LoopHooks = {}): Promise<numbe
 
 /**
  * Terminal state for a ralph run:
- *  - `complete-marker`: agent wrote `TASK_COMPLETE` to progress.md.
  *  - `complete-empty`: no `[ ]` tasks left in tasks.md.
- *  - `cap`: iteration budget exhausted before either of the above.
+ *  - `cap`: iteration budget exhausted before completion.
+ *  - `halted-server-errors`: too many back-to-back upstream 5xx hits.
  */
-type RunResult = "complete-marker" | "complete-empty" | "cap" | "halted-server-errors";
+type RunResult = "complete-empty" | "cap" | "halted-server-errors";
 
 /**
  * Iteration outcomes that mean the agent didn't make forward progress.
@@ -507,7 +504,9 @@ function exitCodeForResult(
 
 interface IterationCtx {
   cfg: Config;
-  task: TaskRef;
+  phase: PhaseRef;
+  /** Stable per-phase key into `state.tasks` (the per-phase attempt bag). */
+  phaseKey: string;
   attempt: number;
   logFile: string;
   log: Logger;
@@ -518,14 +517,14 @@ interface IterationCtx {
   registerAgent: (a: AgentProcess) => void;
   clearAgent: () => void;
   /**
-   * Consecutive rate-limit hits for this task INCLUDING the current
+   * Consecutive rate-limit hits for this phase INCLUDING the current
    * iteration if it ends up rate-limited. Used to drive the exponential
    * fallback in `computeSleepUntil` when no reset epoch is surfaced. Always
    * >= 1.
    */
   rlHitNumber: number;
   /**
-   * Consecutive transient-server-error hits for this task INCLUDING the
+   * Consecutive transient-server-error hits for this phase INCLUDING the
    * current iteration if it ends up a 5xx. Drives the server-error backoff
    * curve. Always >= 1.
    */
@@ -568,7 +567,16 @@ function metricsFromAgent(r: AgentResult): AgentMetrics {
 }
 
 async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
-  const { cfg, task, attempt, logFile, log, hooks } = ctx;
+  const { cfg, phase, phaseKey, attempt, logFile, log, hooks } = ctx;
+  // Snapshot the originally-open task ids so a rollback knows exactly which
+  // checkboxes to flip back to `[ ]`. The agent may add or split tasks mid-run;
+  // we only revert the ones the loop handed it.
+  const phaseTaskIds = phase.tasks.map((t) => t.id);
+  // HEAD before the phase starts — the rollback target on any failure.
+  const originalSha = await currentHeadSha({
+    cwd: cfg.repoRoot,
+    timeoutMs: cfg.gitTimeoutMs,
+  });
   const stream = createWriteStream(logFile, { flags: "a" });
   // Default-zero so every return path below produces a well-formed
   // IterationResult — even paths that never spawn the agent (rate-limit
@@ -590,7 +598,7 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
     subloop,
   });
   try {
-    const promptText = buildPrompt(cfg, task, attempt);
+    const promptText = buildPrompt(cfg, phase, attempt);
 
     log.stage("agent.spawn", `pid pending — timeout ${humanDuration(cfg.claudeTimeoutMs)}`);
 
@@ -690,70 +698,100 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
       return mk("agent-failed");
     }
 
-    if (hasTaskComplete(cfg.progressFile, cfg.stopMarker)) {
-      log.info(`stop marker '${cfg.stopMarker}' written by agent — halting`);
-      return mk("stop-marker");
-    }
-
-    if (!isTaskMarkedDone(cfg.tasksFile, task.id)) {
-      log.warn(`task #${task.id} not marked [x] yet — retrying next iteration`);
+    // Identify which originally-open tasks the agent still has as `[ ]`. If
+    // any remain, the phase is unfinished — roll back the partial work and
+    // retry on the next iteration.
+    const remainingIds = stillOpenIds(cfg.tasksFile, phaseTaskIds);
+    if (remainingIds.length > 0) {
+      log.warn(
+        `${phaseLabel(phase)}: agent left ${remainingIds.length}/${phaseTaskIds.length} ` +
+          `task(s) unchecked (#${remainingIds.join(", #")}) — rolling back the phase`,
+      );
+      await rollbackPhase(ctx, originalSha, phaseTaskIds, "phase-incomplete");
       return mk("task-not-marked");
     }
+
+    // The agent should have committed each task as it went. If anything is
+    // still dirty in the worktree (untracked files, residual unstaged diff,
+    // or the final `[x]` flip that wasn't committed), fold it into a single
+    // tail commit so nothing escapes the phase boundary.
+    if (await hasChanges({ cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs })) {
+      log.stage("git.commit", `tail commit — residual changes after ${phaseLabel(phase)}`);
+      const tail = await commitTask(
+        { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs },
+        phaseSlug(phase),
+        `${phaseLabel(phase)} — tail`,
+        cfg.commitTaskPrefix,
+      );
+      if (!tail.ok) {
+        log.warn(`tail commit failed (exit ${tail.exitCode}) — rolling back phase`);
+        await rollbackPhase(ctx, originalSha, phaseTaskIds, "commit-failed");
+        return mk("tests-failed");
+      }
+    }
+
+    // How many task commits the agent actually produced (used for the
+    // run-summary counter and the no-op detection below). Counts every
+    // `<prefix>(...)` commit between originalSha and HEAD.
+    const phaseCommits = originalSha
+      ? await countPhaseCommits(cfg, originalSha)
+      : 0;
+
+    // Phase-level no-op detection: the agent claims it's done but neither
+    // produced any commits nor left a dirty tree. Treat like the old per-task
+    // no-change retry: revert and try again, accept after N attempts.
+    const phaseState = getTaskState(ctx.state, phaseKey);
+    if (phaseCommits === 0) {
+      const tries = phaseState.noChangeAttempts + 1;
+      phaseState.noChangeAttempts = tries;
+      if (tries <= cfg.noChangeRetryLimit) {
+        log.warn(
+          `${phaseLabel(phase)}: every task [x] but no commits produced ` +
+            `(no-change retry ${tries}/${cfg.noChangeRetryLimit}) — reverting and retrying`,
+        );
+        await rollbackPhase(ctx, originalSha, phaseTaskIds, "no-changes-retry");
+        return mk("no-changes-retry");
+      }
+      log.info(`${phaseLabel(phase)} accepted as a no-op after ${tries} attempts`);
+      return mk("no-changes-accepted");
+    }
+    phaseState.noChangeAttempts = 0;
+    ctx.state.counters.committed += phaseTaskIds.length;
+    log.done(
+      `${phaseLabel(phase)} complete — ${phaseTaskIds.length} task(s) across ` +
+        `${phaseCommits} commit(s)`,
+    );
 
     log.stage("tests.run");
     const runner = hooks.runTests ?? defaultRunTests;
     const tests = await runner(cfg, log);
     if (!tests.ok) {
       ctx.state.counters.testFailures++;
-      log.warn(`tests failed (${humanDuration(tests.durationMs)}) — reverting #${task.id} → [ ]`);
-      revertTaskToPending(cfg.tasksFile, task.id);
-      await dropDirtyTree(ctx, "tests-failed");
+      log.warn(
+        `tests failed (${humanDuration(tests.durationMs)}) — rolling back ${phaseLabel(phase)}`,
+      );
+      // Test failure undoes the per-task commit accounting we just bumped.
+      ctx.state.counters.committed = Math.max(
+        0,
+        ctx.state.counters.committed - phaseTaskIds.length,
+      );
+      await rollbackPhase(ctx, originalSha, phaseTaskIds, "tests-failed");
       return mk("tests-failed");
     }
     log.stage("tests.ok", `${tests.summary} (${humanDuration(tests.durationMs)})`);
 
-    const taskState = getTaskState(ctx.state, task.id);
-    const dirty = await hasChanges({ cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs });
-    if (!dirty) {
-      const tries = taskState.noChangeAttempts + 1;
-      taskState.noChangeAttempts = tries;
-      if (tries <= cfg.noChangeRetryLimit) {
-        log.warn(
-          `task #${task.id} marked [x] but no git changes ` +
-            `(no-change retry ${tries}/${cfg.noChangeRetryLimit}) — reverting and retrying`,
-        );
-        revertTaskToPending(cfg.tasksFile, task.id);
-        return mk("no-changes-retry");
-      }
-      log.info(`task #${task.id} accepted as a no-op after ${tries} attempts`);
-      return mk("no-changes-accepted");
-    }
-    taskState.noChangeAttempts = 0;
-
-    log.stage("git.commit");
-    const c = await commitTask(
-      { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs },
-      task.id,
-      task.title,
-      cfg.commitTaskPrefix,
-    );
-    if (!c.ok) {
-      log.warn(`commit failed (exit ${c.exitCode}) — reverting #${task.id} → [ ]`);
-      revertTaskToPending(cfg.tasksFile, task.id);
-      await dropDirtyTree(ctx, "commit-failed");
-      return mk("tests-failed");
-    }
-    ctx.state.counters.committed++;
-    log.done(`committed ${cfg.commitTaskPrefix}(${task.id}): ${task.title}`);
-
     if (cfg.reviewEnabled) {
-      const originalSha = await currentHeadSha({
-        cwd: cfg.repoRoot,
-        timeoutMs: cfg.gitTimeoutMs,
-      });
+      // Synthesise a `TaskRef` that represents the whole phase so the existing
+      // reviewer/fixer plumbing (which renders `task.id` / `task.title` into
+      // its prompts and commit messages) keeps working unchanged.
+      const phaseTaskRef: TaskRef = {
+        id: phaseSlug(phase),
+        title: phaseLabel(phase),
+        lineNumber: phase.headingLineNumber,
+      };
       const subloopOutcome = await runReviewSubloop({
         cfg,
-        task,
+        task: phaseTaskRef,
         log,
         originalSha,
         abortSignal: ctx.abortSignal,
@@ -768,18 +806,6 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
       subloop = subloopOutcome.usage;
 
       if (subloopOutcome.kind === "diverged") {
-        // The sub-loop gave up but we don't halt the main loop. Two recovery
-        // paths, mirroring how the outer loop already handles tests-failed:
-        //
-        //  - If tests pass at HEAD now, the review just couldn't reach
-        //    "APPROVE+ok" within budget. The task itself is sound — accept
-        //    the partial review chain and move on.
-        //  - If tests are still red, the review chain only added broken
-        //    commits. Reset HEAD back to the task commit, revert the task
-        //    to `[ ]` (so the main agent retries on the next iteration with
-        //    full context), and surface this as a tests-failed outcome.
-        //    The per-task attempt limit eventually escalates to `[!]`
-        //    blocked, so we never spin forever.
         log.warn(
           `review sub-loop did not converge — ${subloopOutcome.reason} ` +
             `(rounds=${subloopOutcome.rounds}, tests=${subloopOutcome.testsOkAtEnd ? "ok" : "fail"})`,
@@ -787,64 +813,25 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
 
         if (subloopOutcome.testsOkAtEnd) {
           log.info(
-            `tests pass at HEAD — accepting task #${task.id} commit chain without review polish`,
+            `tests pass at HEAD — accepting ${phaseLabel(phase)} commit chain without review polish`,
           );
           return mk("committed-review-skipped");
         }
 
-        if (originalSha) {
-          const r = await resetToSha(
-            { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs },
-            originalSha,
-          );
-          if (r.ok) {
-            log.stage("git.reset", `HEAD → ${originalSha.slice(0, 8)} (drop failed review chain)`);
-          } else {
-            log.warn(`git reset to ${originalSha.slice(0, 8)} failed: ${r.detail}`);
-          }
-        } else {
-          log.warn("no originalSha captured — cannot reset; leaving HEAD as-is");
-        }
-
-        // Now reset *past* the task commit too, so the main agent's next
-        // attempt rebuilds the task from scratch instead of duplicating it.
-        const beforeTask = await execa(
-          "git",
-          [
-            "-c",
-            "commit.gpgsign=false",
-            "rev-parse",
-            "HEAD~1",
-          ],
-          {
-            cwd: cfg.repoRoot,
-            timeout: cfg.gitTimeoutMs,
-            reject: false,
-            stdin: "ignore",
-          },
-        );
-        const parentSha =
-          beforeTask.exitCode === 0
-            ? (typeof beforeTask.stdout === "string" ? beforeTask.stdout : String(beforeTask.stdout ?? "")).trim()
-            : "";
-        if (parentSha.length === 40) {
-          const r2 = await resetToSha(
-            { cwd: cfg.repoRoot, timeoutMs: cfg.gitTimeoutMs },
-            parentSha,
-          );
-          if (r2.ok) {
-            log.stage("git.reset", `HEAD → ${parentSha.slice(0, 8)} (drop task commit; will retry)`);
-          } else {
-            log.warn(`git reset to ${parentSha.slice(0, 8)} failed: ${r2.detail}`);
-          }
-        }
-
+        // Tests still red after the review chain — discard everything the
+        // phase produced (task commits + review commits) and retry from the
+        // pre-phase SHA. The per-phase attempt limit eventually escalates to
+        // `[!]` blocked, so we never spin forever.
         ctx.state.counters.testFailures++;
-        revertTaskToPending(cfg.tasksFile, task.id);
-        await dropDirtyTree(ctx, "review-diverged");
+        ctx.state.counters.committed = Math.max(
+          0,
+          ctx.state.counters.committed - phaseTaskIds.length,
+        );
+        await rollbackPhase(ctx, originalSha, phaseTaskIds, "review-diverged");
         appendProgressNote(
           cfg.progressFile,
-          `- task #${task.id} review sub-loop diverged: ${subloopOutcome.reason} — reset and queued for retry`,
+          `- ${phaseLabel(phase)} review sub-loop diverged: ${subloopOutcome.reason} — ` +
+            `reset and queued for retry`,
         );
         return mk("tests-failed");
       }
@@ -854,6 +841,75 @@ async function runIteration(ctx: IterationCtx): Promise<IterationResult> {
     stream.end();
     ctx.clearAgent();
   }
+}
+
+/** Subset of `taskIds` whose checkboxes are still `[ ]` in tasks.md. */
+function stillOpenIds(tasksFile: string, taskIds: ReadonlyArray<string>): string[] {
+  if (taskIds.length === 0) return [];
+  let raw: string;
+  try {
+    raw = readFileSync(tasksFile, "utf8");
+  } catch {
+    return [];
+  }
+  const set = new Set(taskIds);
+  const open: string[] = [];
+  const re = /^[\t ]*-[\t ]+\[\s\][\t ]+(?:\*\*)?(\d+)(?:\*\*)?[\t ]+/;
+  for (const line of raw.split("\n")) {
+    const m = re.exec(line);
+    if (m && set.has(m[1]!)) open.push(m[1]!);
+  }
+  return open;
+}
+
+/** Number of `<prefix>(...)` commits between originalSha and HEAD. */
+async function countPhaseCommits(cfg: Config, originalSha: string): Promise<number> {
+  const r = await execa(
+    "git",
+    ["-c", "commit.gpgsign=false", "rev-list", "--count", `${originalSha}..HEAD`],
+    {
+      cwd: cfg.repoRoot,
+      timeout: cfg.gitTimeoutMs,
+      reject: false,
+      stdin: "ignore",
+    },
+  );
+  if (r.exitCode !== 0) return 0;
+  const txt = typeof r.stdout === "string" ? r.stdout : String(r.stdout ?? "");
+  const n = Number.parseInt(txt.trim(), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+
+/**
+ * Discard every commit the phase produced and flip every task it touched back
+ * to `[ ]`. Used by every failure path inside `runIteration` so a failed
+ * attempt always leaves the repo + tasks.md in the same state as the start of
+ * the iteration — the next attempt then starts from scratch.
+ */
+async function rollbackPhase(
+  ctx: IterationCtx,
+  originalSha: string | null,
+  taskIds: ReadonlyArray<string>,
+  reason: string,
+): Promise<void> {
+  if (originalSha) {
+    const r = await resetToSha(
+      { cwd: ctx.cfg.repoRoot, timeoutMs: ctx.cfg.gitTimeoutMs },
+      originalSha,
+    );
+    if (r.ok) {
+      ctx.log.stage("git.reset", `HEAD → ${originalSha.slice(0, 8)} (${reason})`);
+    } else {
+      ctx.log.warn(`git reset to ${originalSha.slice(0, 8)} failed: ${r.detail}`);
+    }
+  } else {
+    ctx.log.warn("no originalSha captured — cannot reset; leaving HEAD as-is");
+  }
+  // The reset only touches tracked files; tasks.md may be gitignored (the
+  // scaffolder doesn't track it), so flip [x] → [ ] explicitly for the ids the
+  // loop handed out at the start of the iteration.
+  revertTasksToPending(ctx.cfg.tasksFile, taskIds);
+  await dropDirtyTree(ctx, reason);
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
@@ -984,9 +1040,6 @@ function printFinalStatus(ctx: FinalStatusCtx): void {
   const remaining = safeCountOpenTasks(cfg.tasksFile);
 
   switch (runResult) {
-    case "complete-marker":
-      log.done(`ralph finished — '${cfg.stopMarker}' present in progress.md`);
-      break;
     case "complete-empty":
       log.done("ralph finished — all tasks checked off");
       break;
@@ -1080,7 +1133,7 @@ function pruneOldLogs(logsDir: string, retentionDays: number): void {
 async function dropDirtyTree(ctx: IterationCtx, reason: string): Promise<void> {
   if (ctx.cfg.failResetMode === "leave") return;
   const label =
-    `ralph-fail/${reason}/task-${ctx.task.id}-attempt-${ctx.attempt}-` +
+    `ralph-fail/${reason}/phase-${phaseSlug(ctx.phase)}-attempt-${ctx.attempt}-` +
     new Date().toISOString().replace(/[:.]/g, "-");
   const r = await cleanupFailedAttempt(
     { cwd: ctx.cfg.repoRoot, timeoutMs: ctx.cfg.gitTimeoutMs },
@@ -1158,19 +1211,63 @@ function relativePath(repoRoot: string, abs: string): string {
   return abs;
 }
 
-function buildPrompt(cfg: Config, task: TaskRef, attempt: number): string {
+function buildPrompt(cfg: Config, phase: PhaseRef, attempt: number): string {
   const base = loadIterationPrompt(cfg);
+  const taskLines = phase.tasks
+    .map((t) => `    - #${t.id} — ${t.title}`)
+    .join("\n");
   return [
     base,
     "",
     "─".repeat(72),
     "Loop runtime context (provided by the ralphloop driver, not by you):",
-    `  Current task: #${task.id} — ${task.title}`,
-    `  Attempt for this task: #${attempt}`,
+    `  Current phase: ${phaseLabel(phase)}`,
+    `  Attempt for this phase: #${attempt}`,
+    `  Tasks to implement this iteration (in order):`,
+    taskLines,
     `  Loop driver: ralphloop`,
+    "",
+    "Verbatim phase contents from tasks.md (heading + every line below it up to",
+    "the next `## Phase` heading — preserved so you have the exact prose, sub-",
+    "bullets, and design notes the operator wrote):",
+    "",
+    phase.body,
     "─".repeat(72),
     "",
   ].join("\n");
+}
+
+/** Human-friendly phase label for log lines and prompts. */
+function phaseLabel(phase: PhaseRef): string {
+  const trimmed = phase.heading.replace(/^#+\s*/, "").trim();
+  return trimmed.length > 0 ? trimmed : "phase";
+}
+
+/**
+ * Stable key under `state.tasks` for this phase. Falls back to the first
+ * task's id when no heading is present so the in-memory accounting still has
+ * a unique handle.
+ */
+function phaseStateKey(phase: PhaseRef): string {
+  if (phase.id !== "" && phase.id !== "(unphased)") return `phase:${phase.id}`;
+  const first = phase.tasks[0];
+  return first ? `phase:task-${first.id}` : "phase:(empty)";
+}
+
+/**
+ * Short slug used in commit messages, log filenames and metrics — must be
+ * filesystem-safe and reasonably short. Falls back to the first task id when
+ * the heading produces nothing useful.
+ */
+function phaseSlug(phase: PhaseRef): string {
+  const label = phaseLabel(phase).toLowerCase();
+  const slug = label
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+  if (slug.length > 0) return slug;
+  const first = phase.tasks[0];
+  return first ? first.id : "phase";
 }
 
 export async function defaultRunTests(

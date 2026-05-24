@@ -25,7 +25,6 @@ function stubConfig(overrides: Partial<Config> = {}): Config {
     stateFile: `${repoRoot}/.ralphloop/state.json`,
     metricsFile: `${repoRoot}/.ralphloop/metrics.jsonl`,
     maxIterations: 1,
-    stopMarker: "TASK_COMPLETE",
     commitTaskPrefix: "task",
     commitReviewPrefix: "review",
     claudeBin: "claude",
@@ -102,14 +101,12 @@ describe("templateVarsForConfig", () => {
     expect(vars.PROGRESS_FILE).toBe(".ralphloop/progress.md");
     expect(vars.WORKSPACE_DIR).toBe(".ralphloop");
     expect(vars.LOGS_DIR).toBe(".ralphloop/logs");
-    expect(vars.STOP_MARKER).toBe("TASK_COMPLETE");
     expect(vars.COMMIT_TASK_PREFIX).toBe("task");
   });
 
-  test("custom stopMarker + prefix flow through", () => {
-    const cfg = stubConfig({ stopMarker: "ALL_DONE", commitTaskPrefix: "feat" });
+  test("custom commit prefix flows through", () => {
+    const cfg = stubConfig({ commitTaskPrefix: "feat" });
     const vars = templateVarsForConfig(cfg);
-    expect(vars.STOP_MARKER).toBe("ALL_DONE");
     expect(vars.COMMIT_TASK_PREFIX).toBe("feat");
   });
 });
@@ -136,7 +133,7 @@ describe("loadIterationPrompt", () => {
   test("uses the consumer override when present and substitutes placeholders", () => {
     const tmp = mkdtempSync(resolve(tmpdir(), "ralph-prompt-override-"));
     const promptPath = resolve(tmp, "prompt.md");
-    writeFileSync(promptPath, "Spec lives at {{GOAL_FILE}}; stop with {{STOP_MARKER}}.");
+    writeFileSync(promptPath, "Spec lives at {{GOAL_FILE}}; commits use {{COMMIT_TASK_PREFIX}}.");
     const cfg = stubConfig({
       repoRoot: tmp,
       promptFile: promptPath,
@@ -145,9 +142,9 @@ describe("loadIterationPrompt", () => {
       tasksFile: resolve(tmp, ".ralphloop", "tasks.md"),
       progressFile: resolve(tmp, ".ralphloop", "progress.md"),
       logsDir: resolve(tmp, ".ralphloop", "logs"),
-      stopMarker: "ALL_DONE",
+      commitTaskPrefix: "feat",
     });
-    expect(loadIterationPrompt(cfg)).toBe("Spec lives at GOAL.md; stop with ALL_DONE.");
+    expect(loadIterationPrompt(cfg)).toBe("Spec lives at GOAL.md; commits use feat.");
   });
 });
 

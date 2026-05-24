@@ -4,11 +4,8 @@
 # Project spec (default: GOAL.md at repoRoot)
 # goal: GOAL.md
 
-# Iteration cap (default: 50)
+# Iteration cap (default: 50). Each iteration drives one full phase.
 # maxIterations: 50
-
-# Halt-sentinel the agent writes to progress.md (default: TASK_COMPLETE)
-# stopMarker: TASK_COMPLETE
 
 # Commit-message prefixes (defaults: task / review)
 # commit:
@@ -23,27 +20,27 @@
 #   claude   — official Claude Code CLI (API-key billing)
 # agentBackend: claude-p
 
-# Claude CLI binary + model (defaults: claude / claude-sonnet-4-6)
+# Claude CLI binary + model (defaults: claude / claude-opus-4-7)
 # claude:
 #   bin: claude
 #   pBin: claude-p          # binary for the claude-p backend
-#   model: claude-sonnet-4-6
+#   model: claude-opus-4-7
 #   timeoutS: 1800
 
-# Reviewer→Fixer sub-loop (default: enabled)
+# Reviewer→Fixer sub-loop (default: enabled, both on Opus)
 # review:
 #   enabled: true
 #   reviewerModel: claude-opus-4-7
-#   fixerModel: claude-sonnet-4-6
+#   fixerModel: claude-opus-4-7
 #   maxRounds: 5
 
 # Cooldown (hours) before `ralphloop retry-blocked` will reopen a [!] task
 # that was just blocked. Pass --force to bypass it. Default: 6
 # blockedRetryCooldownHours: 6
 
-# What to do when the run finishes successfully (no [ ] tasks left, or the
-# stop marker is written). Opt-in: by default ralphloop never touches branches
-# and the loop just stays on whatever branch it ran on.
+# What to do when the run finishes successfully (no [ ] tasks left in any
+# phase). Opt-in: by default ralphloop never touches branches and the loop
+# just stays on whatever branch it ran on.
 #   merge: true        — check out targetBranch and merge the work branch into
 #                        it with `--no-ff` (records a merge commit), then stay
 #                        there. Local only (never pushes). The work branch is

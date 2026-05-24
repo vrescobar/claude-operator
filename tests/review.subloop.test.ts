@@ -53,7 +53,6 @@ function setupSandbox(opts: { reviewMaxRounds: number; reviewEnabled?: boolean }
     stateFile: resolve(workspaceDir, "state.json"),
     metricsFile: resolve(workspaceDir, "metrics.jsonl"),
     maxIterations: 2,
-    stopMarker: "TASK_COMPLETE",
     claudeBin: FAKE_CLAUDE,
     agentBackend: "claude",
     claudePBin: "claude-p",
@@ -176,12 +175,12 @@ describe("review subloop", () => {
       // Two calls to the reviewer (round 1 NEEDS_CHANGES, round 2 APPROVE).
       expect(readFileSync(callsFile, "utf8")).toBe("2");
 
-      // git log should show: init, task(77), review(77, round 1)
+      // git log should show: init, task(phase-x): … tail, review(phase-x, round 1)
       const log = execaSync("git", ["log", "--oneline"], { cwd: root });
       const lines = log.stdout.trim().split("\n");
-      expect(lines.find((l) => l.includes("task(77): Subloop smoke task"))).toBeDefined();
+      expect(lines.find((l) => l.includes("task(phase-x):"))).toBeDefined();
       expect(
-        lines.find((l) => l.includes("review(77, round 1): apply review feedback")),
+        lines.find((l) => l.includes("review(phase-x, round 1): apply review feedback")),
       ).toBeDefined();
     });
   });
@@ -222,9 +221,9 @@ describe("review subloop", () => {
       // tasks left, so we exit 0 instead of halting at 2.
       expect(code).toBe(0);
 
-      // The original task commit must still be present.
+      // The phase commit must still be present.
       const log = execaSync("git", ["log", "--oneline"], { cwd: root });
-      expect(log.stdout).toContain("task(77): Subloop smoke task");
+      expect(log.stdout).toContain("task(phase-x):");
     });
   });
 
